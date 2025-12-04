@@ -6,7 +6,8 @@ export type ViewMode =
   | "asm-lab"
   | "install"
   | "show"
-  | "script-lab";
+  | "script-lab"
+  | "file-manager";
 
 export interface Device {
   id: string;
@@ -37,4 +38,12 @@ export interface AppDetail {
   uid: string;
   firstInstallTime: string;
   lastUpdateTime: string;
+}
+
+export interface FileItem {
+  name: string;
+  is_dir: boolean;
+  size: string;
+  permissions: string;
+  date: string;
 }

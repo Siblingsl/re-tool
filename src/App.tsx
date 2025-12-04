@@ -13,6 +13,7 @@ import { getConnectedDevices } from "./services/deviceService";
 
 import { ViewMode, Device } from "./types";
 import ScriptLab from "./views/ScriptLab";
+import FileExplorer from "./views/FileExplorer";
 
 // 定义脚本接口
 export interface ScriptItem {
@@ -221,6 +222,13 @@ const App: React.FC = () => {
               )}
             </div>
           ))}
+        {currentView === "file-manager" && currentDevice && (
+          <FileExplorer
+            deviceId={currentDevice.id}
+            initialPath="/sdcard"
+            mode="full"
+          />
+        )}
         {currentView === "script-lab" && (
           <ScriptLab
             scripts={scripts} // 🔥 传给脚本工坊

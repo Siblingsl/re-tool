@@ -61,6 +61,16 @@ struct FridaRelease {
     tag_name: String,
 }
 
+// 🔥 新增：文件信息结构体
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct FileItem {
+    name: String,
+    is_dir: bool,
+    size: String,
+    permissions: String,
+    date: String,
+}
+
 // --- 🔥 1. 重命名内部辅助函数 (原 run_command 改为 cmd_exec) ---
 fn cmd_exec(cmd: &str, args: &[&str]) -> Result<String, String> {
     let mut command = Command::new(cmd);
@@ -707,6 +717,70 @@ async fn open_file_explorer(path: String) -> Result<(), String> {
     Ok(())
 }
 
+// 🔥 新增：获取文件列表命令
+#[tauri::command]
+async fn get_file_list(device_id: String, path: String) -> Result<Vec<FileItem>, String> {
+    // 优先尝试使用 Root 权限读取，因为 /data/data 需要 Root
+    // 命令：adb shell "su -c 'ls -l <path>'"
+    // 如果失败（比如没Root），回退到普通 ls -l
+    
+    let cmd = format!("su -c 'ls -l \"{}\"'", path); // 尝试 Root
+    let mut output = cmd_exec("adb", &["-s", &device_id, "shell", &cmd])?;
+
+    if output.contains("denied") || output.contains("not found") {
+        // 回退到普通权限 (适合 /sdcard)
+        output = cmd_exec("adb", &["-s", &device_id, "shell", "ls", "-l", &path])?;
+    }
+
+    let mut files = Vec::new();
+
+    // 解析 ls -l 输出
+    // 典型格式: drwxrwx--x 2 root root 4096 2023-01-01 12:00 foldername
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("total") { continue; }
+
+        // 简单的空格分割解析
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 { continue; } // 格式不对跳过
+
+        let permissions = parts[0];
+        let is_dir = permissions.starts_with('d');
+        
+        // 处理文件名包含空格的情况：取第8个字段之后的所有内容
+        // ls -l date format varies (some have time, some year). 
+        // 这是一个简化的解析器，适配大多数 Android ls
+        let name_start_index = if parts.len() > 7 { 7 } else { parts.len() - 1 };
+        // 有些系统 ls -l 只有日期没有时间，这里做一个容错
+        let name = parts[name_start_index..].join(" ");
+        
+        // 过滤掉 . 和 ..
+        if name == "." || name == ".." { continue; }
+
+        let size = if is_dir { "".to_string() } else { parts[4].to_string() }; // 第5列通常是大小
+        let date = format!("{} {}", parts[5], parts[6]); // 日期时间
+
+        files.push(FileItem {
+            name,
+            is_dir,
+            size,
+            permissions: permissions.to_string(),
+            date,
+        });
+    }
+
+    // 排序：文件夹在前
+    files.sort_by(|a, b| {
+        if a.is_dir == b.is_dir {
+            a.name.cmp(&b.name)
+        } else {
+            b.is_dir.cmp(&a.is_dir)
+        }
+    });
+
+    Ok(files)
+}
+
 // ==========================================
 //  主函数
 // ==========================================
@@ -747,7 +821,8 @@ fn main() {
             run_frida_script,
             get_foreground_app,
             extract_apk,
-            open_file_explorer
+            open_file_explorer,
+            get_file_list
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

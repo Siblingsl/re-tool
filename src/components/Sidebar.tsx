@@ -22,6 +22,7 @@ import {
   PlayCircleOutlined,
   UnlockOutlined,
   ExperimentOutlined,
+  FolderOpenOutlined,
 } from "@ant-design/icons";
 import {
   Avatar,
@@ -636,6 +637,16 @@ const Sidebar: React.FC<SidebarProps> = ({
       label: "安装应用",
       icon: <AppstoreAddOutlined />,
       onClick: () => handleInstallApp(device),
+    },
+    // 🔥 新增：文件资源管理器
+    {
+      key: "files",
+      label: "文件管理器",
+      icon: <FolderOpenOutlined />,
+      onClick: () => {
+        onViewChange("file-manager"); // 切换到全局文件视图
+        onDeviceSelect(device.id);
+      },
     },
     { type: "divider" },
     // 🔥 动态 Frida 控制菜单

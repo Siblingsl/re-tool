@@ -303,3 +303,38 @@ html,
 .nav-item-split.active .nav-item-action:hover {
   background-color: rgba(37, 99, 235, 0.1) !important;
 }
+
+/* --- 修复 Antd Table 在 Flex 布局下的高度自适应问题 --- */
+/* 给 Table 外层包裹的 div 加上这个类 */
+.auto-fit-table {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* 强制打通 Antd Table 内部的层层包裹，让 Body 占满剩余空间 */
+.auto-fit-table .ant-table-wrapper,
+.auto-fit-table .ant-spin-nested-loading,
+.auto-fit-table .ant-spin-container,
+.auto-fit-table .ant-table-container,
+.auto-fit-table .ant-table {
+  height: 100%;
+}
+
+/* 让表头固定，表身自动填满 */
+.auto-fit-table .ant-table-body {
+  flex: 1;
+  overflow-y: auto !important; /* 强制开启垂直滚动 */
+  height: 100% !important;
+  max-height: none !important;
+}
+
+/* --- 工具类：隐藏滚动条 (仅在 mode=compact 时使用) --- */
+.no-scrollbar .ant-table-body::-webkit-scrollbar {
+  display: none; /* Chrome/Safari/Webkit 隐藏 */
+}
+.no-scrollbar .ant-table-body {
+  -ms-overflow-style: none; /* IE/Edge */
+  scrollbar-width: none; /* Firefox */
+}

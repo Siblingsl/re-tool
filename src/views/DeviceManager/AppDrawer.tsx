@@ -34,6 +34,7 @@ import {
 import { AppInfo, ViewMode, AppDetail, Device } from "../../types"; // 引入 Device 和 AppDetail
 import { invoke } from "@tauri-apps/api/core";
 import FridaConsole from "./FridaConsole";
+import FileExplorer from "../FileExplorer";
 
 interface AppDrawerProps {
   visible: boolean;
@@ -260,10 +261,10 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
       label: <span>概览</span>,
       icon: <DashboardOutlined />,
       children: (
-        <div style={{ padding: 16 }}>
+        <div style={{ padding: "16px 0" }}>
           {/* 详细信息展示区 */}
           <Spin spinning={loading}>
-            <Descriptions column={1} bordered size="small" title="详细信息">
+            <Descriptions column={1} bordered size="small">
               <Descriptions.Item label="版本名称">
                 {detail?.versionName || app.ver || "加载中..."}
               </Descriptions.Item>
@@ -426,17 +427,20 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
       children: (
         <div
           style={{
-            padding: 24,
-            height: "100%",
-            display: "flex",
-            flexDirection: "column",
+            padding: "16px 0",
             alignItems: "center",
-            justifyContent: "center",
             color: "#999",
           }}
         >
-          <Empty description="Root 文件管理器 (开发中)" />
-          <div style={{ marginTop: 16 }}>支持查看 /data/data/{app.pkg}</div>
+          {/* <Empty description="Root 文件管理器 (开发中)" />
+          <div style={{ marginTop: 16 }}>支持查看 /data/data/{app.pkg}</div> */}
+          <div style={{ height: "100%" }}>
+            <FileExplorer
+              deviceId={device?.id || ""}
+              initialPath={`/data/data/${app.pkg}`}
+              mode="compact" // 直达应用数据目录
+            />
+          </div>
         </div>
       ),
     },
