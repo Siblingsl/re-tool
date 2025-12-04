@@ -16,6 +16,8 @@ use std::fs::File;
 use xz2::read::XzDecoder; 
 use std::io::{BufRead, BufReader};
 use std::process::Stdio;
+use directories::UserDirs;
+use std::path::PathBuf;
 
 // --- 状态结构体 ---
 struct AdbState {
@@ -632,6 +634,79 @@ async fn get_foreground_app(device_id: String) -> Result<String, String> {
     Err("未找到前台应用，请确保手机屏幕已点亮并打开了 App".to_string())
 }
 
+// 🔥 修复版：提取 APK (包含详细错误日志)
+#[tauri::command]
+async fn extract_apk(device_id: String, pkg: String) -> Result<String, String> {
+    // 1. 获取 APK 路径
+    let path_output = Command::new("adb")
+        .args(&["-s", &device_id, "shell", "pm", "path", &pkg])
+        .output()
+        .map_err(|e| format!("执行 pm path 失败: {}", e))?;
+
+    let path_stdout = String::from_utf8_lossy(&path_output.stdout).to_string();
+    
+    // 解析路径：取第一行 (忽略 Split APKs)，去除 "package:" 前缀
+    let remote_path = path_stdout.lines()
+        .next()
+        .ok_or(format!("未找到应用 {}，请确认已安装", pkg))?
+        .replace("package:", "")
+        .trim()
+        .to_string();
+
+    if remote_path.is_empty() {
+        return Err("解析到的 APK 路径为空".to_string());
+    }
+
+    // 2. 确定本地保存路径 (用户下载目录)
+    let user_dirs = UserDirs::new().ok_or("无法获取用户目录")?;
+    let download_dir = user_dirs.download_dir().ok_or("无法获取下载目录")?;
+    
+    // 文件名: com.example.app.apk
+    let file_name = format!("{}.apk", pkg);
+    let local_path = download_dir.join(&file_name);
+    let local_path_str = local_path.to_string_lossy().to_string();
+
+    // 3. 执行 adb pull (同时捕获 stderr)
+    let pull_output = Command::new("adb")
+        .args(&["-s", &device_id, "pull", &remote_path, &local_path_str])
+        .output()
+        .map_err(|e| format!("执行 adb pull 失败: {}", e))?;
+
+    // 4. 检查结果
+    if pull_output.status.success() {
+        // 成功
+        Ok(local_path_str)
+    } else {
+        // 失败：优先返回 stderr 里的错误信息
+        let error_msg = String::from_utf8_lossy(&pull_output.stderr).to_string();
+        // 如果 stderr 为空，再看 stdout
+        let out_msg = String::from_utf8_lossy(&pull_output.stdout).to_string();
+        
+        Err(format!("ADB 报错: {} {}", error_msg, out_msg))
+    }
+}
+
+// 🔥 新增：打开文件所在位置
+#[tauri::command]
+async fn open_file_explorer(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        // Windows 特有：打开文件夹并选中文件
+        Command::new("explorer")
+            .args(["/select,", &path]) // 注意逗号
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Mac/Linux: 直接打开文件所在目录
+        open::that(path).map_err(|e| e.to_string())?;
+    }
+    
+    Ok(())
+}
+
 // ==========================================
 //  主函数
 // ==========================================
@@ -670,7 +745,9 @@ fn main() {
             launch_app,
             stop_app,
             run_frida_script,
-            get_foreground_app
+            get_foreground_app,
+            extract_apk,
+            open_file_explorer
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

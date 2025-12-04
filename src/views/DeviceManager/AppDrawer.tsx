@@ -10,6 +10,10 @@ import {
   Divider,
   Select,
   Tooltip,
+  Tabs,
+  Card,
+  Empty,
+  Modal,
 } from "antd";
 import {
   AppstoreOutlined,
@@ -22,6 +26,10 @@ import {
   FieldTimeOutlined,
   EditOutlined,
   ThunderboltOutlined,
+  DashboardOutlined,
+  FolderOpenOutlined,
+  FileTextOutlined,
+  DownloadOutlined,
 } from "@ant-design/icons";
 import { AppInfo, ViewMode, AppDetail, Device } from "../../types"; // 引入 Device 和 AppDetail
 import { invoke } from "@tauri-apps/api/core";
@@ -158,6 +166,52 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
     }
   };
 
+  // --- 处理提取 APK ---
+  const handleExtractApk = async () => {
+    if (!app || !device) return;
+    const hide = message.loading(`正在提取 ${app.name} 的 APK...`, 0);
+
+    try {
+      // 1. 调用后端
+      const savePath = await invoke<string>("extract_apk", {
+        deviceId: device.id,
+        pkg: app.pkg,
+      });
+
+      hide();
+
+      // 2. 成功弹窗
+      Modal.success({
+        title: "提取成功",
+        content: (
+          <div>
+            <p>APK 已保存至下载目录：</p>
+            <div
+              style={{
+                background: "#f5f5f5",
+                padding: 8,
+                borderRadius: 4,
+                fontFamily: "monospace",
+                wordBreak: "break-all",
+              }}
+            >
+              {savePath}
+            </div>
+          </div>
+        ),
+        okText: "打开所在文件夹",
+        cancelText: "关闭",
+        closable: true,
+        onOk: () => {
+          // 调用后端打开文件夹
+          invoke("open_file_explorer", { path: savePath });
+        },
+      });
+    } catch (e: any) {
+      hide();
+      message.error(e); // 显示具体的错误信息
+    }
+  };
   if (!app) return null;
 
   // --- 处理 Spawn (冷启动) ---
@@ -200,52 +254,13 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
     }
   };
 
-  return (
-    <Drawer
-      title={app.name}
-      open={visible}
-      onClose={onClose}
-      width={consoleVisible ? 900 : 480}
-      extra={
-        <Button
-          type="text"
-          icon={<ReloadOutlined />}
-          onClick={fetchDetail}
-          loading={loading}
-        />
-      }
-      // 去掉默认 padding，由内部 flex 布局控制
-      bodyStyle={{ padding: 0, overflow: "hidden" }}
-    >
-      <div
-        style={{
-          display: "flex", // 让左右两块并排
-          height: "100%",
-          width: "100%",
-          overflow: "hidden",
-        }}
-      >
-        <div
-          style={{
-            width: 450, // 固定宽度
-            flexShrink: 0, // 防止被压缩
-            padding: 24, // 内容 padding
-            overflowY: "auto", // 只有这一块滚动
-            borderRight: consoleVisible ? "1px solid #f0f0f0" : "none",
-          }}
-        >
-          {/* 头部信息 */}
-          <div style={{ textAlign: "center" }}>
-            <Avatar
-              shape="square"
-              size={80}
-              style={{ backgroundColor: app.icon }}
-              icon={<AppstoreOutlined />}
-            />
-            <h3 style={{ margin: "12px 0 4px" }}>{app.name}</h3>
-            <Tag style={{ fontFamily: "monospace" }}>{app.pkg}</Tag>
-          </div>
-
+  const tabItems = [
+    {
+      key: "overview",
+      label: <span>概览</span>,
+      icon: <DashboardOutlined />,
+      children: (
+        <div style={{ padding: 16 }}>
           {/* 详细信息展示区 */}
           <Spin spinning={loading}>
             <Descriptions column={1} bordered size="small" title="详细信息">
@@ -306,7 +321,10 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
                   placeholder="选择要注入的脚本"
                   value={selectedScriptId}
                   onChange={setSelectedScriptId}
-                  options={scripts.map((s) => ({ label: s.name, value: s.id }))}
+                  options={scripts.map((s) => ({
+                    label: s.name,
+                    value: s.id,
+                  }))}
                 />
                 <Tooltip title="去脚本工坊编辑">
                   <Button
@@ -370,6 +388,13 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
                 算法分析
               </Button>
               <Button
+                style={{ flex: 1 }}
+                icon={<DownloadOutlined />}
+                onClick={handleExtractApk}
+              >
+                提取 APK
+              </Button>
+              <Button
                 block
                 icon={<FileZipOutlined />}
                 onClick={() => {
@@ -391,6 +416,106 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
               卸载应用
             </Button>
           </div>
+        </div>
+      ),
+    },
+    {
+      key: "files",
+      label: <span>文件</span>,
+      icon: <FolderOpenOutlined />,
+      children: (
+        <div
+          style={{
+            padding: 24,
+            height: "100%",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "#999",
+          }}
+        >
+          <Empty description="Root 文件管理器 (开发中)" />
+          <div style={{ marginTop: 16 }}>支持查看 /data/data/{app.pkg}</div>
+        </div>
+      ),
+    },
+    {
+      key: "logs",
+      label: <span>日志</span>,
+      icon: <FileTextOutlined />,
+      children: (
+        <div
+          style={{
+            padding: 24,
+            height: "100%",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "#999",
+          }}
+        >
+          <Empty description="系统 Logcat + Frida Log (开发中)" />
+          <div style={{ marginTop: 16 }}>实时过滤 {app.pkg} 的日志</div>
+        </div>
+      ),
+    },
+  ];
+
+  return (
+    <Drawer
+      title={app.name}
+      open={visible}
+      onClose={onClose}
+      width={consoleVisible ? 900 : 480}
+      extra={
+        <Button
+          type="text"
+          icon={<ReloadOutlined />}
+          onClick={fetchDetail}
+          loading={loading}
+        />
+      }
+      // 去掉默认 padding，由内部 flex 布局控制
+      bodyStyle={{ padding: 0, overflow: "hidden" }}
+    >
+      <div
+        style={{
+          display: "flex", // 让左右两块并排
+          height: "100%",
+          width: "100%",
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            width: 450, // 固定宽度
+            flexShrink: 0, // 防止被压缩
+            padding: 24, // 内容 padding
+            overflowY: "auto", // 只有这一块滚动
+            borderRight: consoleVisible ? "1px solid #f0f0f0" : "none",
+          }}
+        >
+          {/* 头部信息 */}
+          <div style={{ textAlign: "center" }}>
+            <Avatar
+              shape="square"
+              size={80}
+              style={{ backgroundColor: app.icon }}
+              icon={<AppstoreOutlined />}
+            />
+            <h3 style={{ margin: "12px 0 4px" }}>{app.name}</h3>
+            <Tag style={{ fontFamily: "monospace" }}>{app.pkg}</Tag>
+          </div>
+          {/* 🔥 这里的 Tabs 撑满左侧 */}
+          <Tabs
+            defaultActiveKey="overview"
+            centered
+            items={tabItems}
+            style={{ height: "100%" }}
+            tabBarStyle={{ padding: "0 24px", marginBottom: 0, marginTop: 12 }}
+          />
         </div>
 
         {/* 🔥 核心修改 3：右侧控制台 (条件渲染) */}

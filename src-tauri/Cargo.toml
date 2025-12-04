@@ -26,3 +26,5 @@ tauri-plugin-dialog = "2"
 reqwest = { version = "0.11", features = ["json", "stream"] }
 xz2 = "0.1"
 tempfile = "3.8"
+directories = "5.0"  # 用于获取系统标准目录(如Downloads)
+open = "5.0"         # 用于打开文件管理器
