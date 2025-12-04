@@ -1,0 +1,305 @@
+/* src/App.css */
+:root {
+  --bg-app: #f8fafc; /* 整体背景 (冷灰白) */
+  --bg-sidebar: #ffffff; /* 侧边栏背景 */
+  --bg-card: #ffffff; /* 卡片背景 */
+  --text-primary: #334155; /* 主要文字 (深岩灰) */
+  --text-secondary: #64748b; /* 次要文字 */
+  --accent-color: #3b82f6; /* 科技蓝 */
+  --accent-hover: #2563eb;
+  --border-color: #e2e8f0; /* 边框颜色 */
+  --radius-lg: 12px;
+  --radius-md: 8px;
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+}
+
+body,
+html,
+#root {
+  height: 100%;
+  margin: 0;
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+  background-color: var(--bg-app);
+  color: var(--text-primary);
+  overflow: hidden;
+}
+
+.layout-container {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+}
+
+/* --- 侧边栏 --- */
+.sidebar {
+  width: 260px;
+  background-color: var(--bg-sidebar);
+  border-right: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.sidebar-header {
+  height: 60px;
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  font-weight: 800;
+  font-size: 18px;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-color);
+  gap: 10px;
+}
+
+.sidebar-section-title {
+  padding: 24px 20px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #94a3b8;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.nav-item {
+  margin: 0 12px;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.nav-item:hover {
+  background-color: #f1f5f9;
+  color: var(--text-primary);
+}
+
+.nav-item.active {
+  background-color: #eff6ff;
+  color: var(--accent-color);
+}
+
+.status-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-left: auto;
+}
+
+/* --- 主区域 --- */
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--bg-app);
+}
+
+/* 工具栏/顶部Header */
+.content-header {
+  height: 60px;
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+/* App Grid (复用之前的逻辑，微调样式) */
+.scroll-container {
+  flex: 1;
+  padding: 24px;
+  overflow-y: auto;
+}
+
+.app-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 16px;
+}
+
+.app-card {
+  background: white;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.app-card:hover {
+  border-color: var(--accent-color);
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-2px);
+}
+
+/* --- 工具界面：代码转换器 --- */
+.tool-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  gap: 16px;
+  height: 100%;
+  overflow: hidden;
+}
+
+.code-editor-wrapper {
+  flex: 1;
+  display: flex;
+  gap: 16px;
+  min-height: 0; /* 允许收缩 */
+}
+
+.editor-pane {
+  flex: 1;
+  background: white;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+}
+
+.pane-toolbar {
+  height: 40px;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  background: #f8fafc;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.editor-area {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  border: none;
+  resize: none;
+  padding: 16px;
+  font-family: "Fira Code", monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  outline: none;
+  background: #ffffff; /* 浅色编辑器背景 */
+  color: #333;
+}
+.editor-area::placeholder {
+  color: #ccc;
+}
+
+/* 输出区域适配暗色代码高亮，但外框保持浅色 */
+.output-area-dark {
+  background: #1e1e1e;
+  height: 100%;
+  margin: 0;
+}
+
+/* 拖拽上传区域 (.so) */
+.upload-zone {
+  border: 2px dashed var(--border-color);
+  border-radius: var(--radius-lg);
+  background: white;
+  height: 200px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  transition: all 0.2s;
+}
+.upload-zone:hover {
+  border-color: var(--accent-color);
+  background: #eff6ff;
+  color: var(--accent-color);
+}
+
+/* src/App.css */
+
+/* --- 新增：分裂式导航项样式 --- */
+
+/* 1. 外层容器：负责圆角、边框和整体背景 */
+.nav-item-split {
+  margin: 0 12px 8px 12px; /* 保持原有的外边距 */
+  display: flex;
+  align-items: stretch; /* 让左右两边高度一致 */
+  border-radius: var(--radius-md);
+  border: 1px solid transparent; /* 预留边框位置 */
+  transition: all 0.2s;
+  background-color: transparent; /* 默认透明 */
+  color: var(--text-secondary);
+  overflow: hidden; /* 关键：保证子元素背景色不溢出圆角 */
+  cursor: pointer;
+}
+
+/* 悬停状态：显示浅灰背景 */
+.nav-item-split:hover {
+  background-color: #f1f5f9;
+  color: var(--text-primary);
+}
+
+/* 激活状态：蓝色背景 */
+.nav-item-split.active {
+  background-color: #eff6ff;
+  color: var(--accent-color);
+  border-color: #dbeafe; /* 激活时加一个淡蓝色边框 */
+}
+
+/* 2. 左侧：主内容区 (点击切换设备) */
+.nav-item-main {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0 10px 12px; /* 上右下左 */
+  min-width: 0; /* 防止文本溢出撑开 flex */
+}
+
+/* 3. 右侧：操作按钮区 (点击弹出菜单) */
+.nav-item-action {
+  width: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-left: 1px solid transparent; /* 默认隐藏分割线 */
+  transition: all 0.2s;
+  margin-left: 4px; /* 让分割线稍微有点间距 */
+}
+
+/* 悬停在整个行时，显示分割线 */
+.nav-item-split:hover .nav-item-action {
+  border-left-color: rgba(0, 0, 0, 0.06); /* 浅灰色分割线 */
+  background-color: rgba(0, 0, 0, 0.02); /* 微微加深背景，像个独立按钮 */
+}
+
+/* 激活状态下的分割线颜色 */
+.nav-item-split.active .nav-item-action {
+  border-left-color: rgba(37, 99, 235, 0.1);
+}
+
+/* 单独悬停在右侧按钮时，加深反馈 */
+.nav-item-split .nav-item-action:hover {
+  background-color: rgba(0, 0, 0, 0.08) !important;
+  color: var(--text-primary);
+}
+.nav-item-split.active .nav-item-action:hover {
+  background-color: rgba(37, 99, 235, 0.1) !important;
+}
