@@ -14,6 +14,7 @@ import { getConnectedDevices } from "./services/deviceService";
 import { ViewMode, Device } from "./types";
 import ScriptLab from "./views/ScriptLab";
 import FileExplorer from "./views/FileExplorer";
+import ApkBuilder from "./views/ApkBuilder";
 
 // 定义脚本接口
 export interface ScriptItem {
@@ -235,6 +236,10 @@ const App: React.FC = () => {
             onSave={handleSaveScript} // 🔥 允许修改
             currentDeviceId={selectedDeviceId}
           />
+        )}
+
+        {currentView === "apk-builder" && (
+          <ApkBuilder currentDevice={currentDevice} />
         )}
 
         {currentView === "show" && currentDevice && (

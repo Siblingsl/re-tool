@@ -80,3 +80,75 @@ export const convertCode = async (req: ConvertRequest): Promise<string> => {
     );
   }
 };
+
+// 🔥 新增：通用逆向 AI 助手
+export type AiTaskType = "explain" | "hook" | "convert_java";
+
+export const askAiAssistant = async (
+  code: string,
+  task: AiTaskType
+): Promise<string> => {
+  let prompt = "";
+
+  switch (task) {
+    case "explain":
+      prompt = `
+        Role: 资深 Android 逆向安全专家。
+        Task: 请用通俗易懂的中文解释以下代码片段的逻辑、功能以及潜在的安全风险。
+        Code:
+        \`\`\`
+        ${code}
+        \`\`\`
+      `;
+      break;
+    case "hook":
+      prompt = `
+        Role: Frida 脚本专家。
+        Task: 根据以下反编译代码（Java/Smali），生成一个可用的 Frida JavaScript Hook 脚本。
+        Requirements:
+        1. 使用 Java.use() 或 Java.choose()。
+        2. 拦截目标方法，打印参数 (arguments) 和返回值 (return value)。
+        3. 处理重载 (Overload) 情况。
+        4. 代码包含详细注释。
+        5. 只返回 JavaScript 代码块。
+        Code:
+        \`\`\`
+        ${code}
+        \`\`\`
+      `;
+      break;
+    case "convert_java":
+      prompt = `
+        Role: 编译器专家。
+        Task: 将以下 Smali 汇编代码或 C 伪代码转换为易读的 Java 源代码。
+        Constraints: 逻辑要准确，变量名尽量语义化。只返回 Java 代码。
+        Code:
+        \`\`\`
+        ${code}
+        \`\`\`
+      `;
+      break;
+  }
+
+  try {
+    const result = await genAI.models.generateContent({
+      model: MODEL_NAME,
+      config: {
+        temperature: 0.2,
+        systemInstruction: {
+          parts: [{ text: prompt }],
+        },
+      },
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: code }],
+        },
+      ],
+    });
+    return result.text || "AI 未返回任何内容";
+  } catch (error) {
+    console.error("AI Error:", error);
+    throw new Error("AI 服务请求失败，请检查网络或 API Key");
+  }
+};

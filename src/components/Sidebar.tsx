@@ -23,6 +23,7 @@ import {
   UnlockOutlined,
   ExperimentOutlined,
   FolderOpenOutlined,
+  BuildOutlined,
 } from "@ant-design/icons";
 import {
   Avatar,
@@ -831,6 +832,12 @@ const Sidebar: React.FC<SidebarProps> = ({
         onClick={() => onViewChange("script-lab")}
       >
         <ExperimentOutlined /> <span>脚本工坊</span>
+      </div>
+      <div
+        className={`nav-item ...`}
+        onClick={() => onViewChange("apk-builder")}
+      >
+        <BuildOutlined /> <span>APK 改包工坊</span>
       </div>
       <div
         className={`nav-item ${

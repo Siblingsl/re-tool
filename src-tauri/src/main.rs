@@ -18,6 +18,8 @@ use std::io::{BufRead, BufReader};
 use std::process::Stdio;
 use directories::UserDirs;
 use std::fs;
+use std::path::Path;
+use std::env; // 引入 env
 
 // --- 状态结构体 ---
 struct AdbState {
@@ -71,14 +73,34 @@ struct FileItem {
     date: String,
 }
 
+// --- 数据结构：文件树节点 ---
+#[derive(Debug, Serialize, Deserialize)]
+struct FileNode {
+    title: String,
+    key: String, // 完整路径
+    #[serde(rename = "isLeaf")]
+    is_leaf: bool, 
+    children: Option<Vec<FileNode>>,
+}
+
 // --- 🔥 1. 重命名内部辅助函数 (原 run_command 改为 cmd_exec) ---
 fn cmd_exec(cmd: &str, args: &[&str]) -> Result<String, String> {
     let mut command = Command::new(cmd);
     command.args(args);
     #[cfg(target_os = "windows")]
     command.creation_flags(0x08000000); 
+    
     let output = command.output().map_err(|e| e.to_string())?;
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    // 把两部分信息拼起来返回，这样你就能在前端看到完整日志了
+    if stderr.is_empty() {
+        Ok(stdout)
+    } else {
+        Ok(format!("{}\n[Stderr]: {}", stdout, stderr))
+    }
 }
 
 // --- 🔥 2. 新增：暴露给前端的通用命令 ---
@@ -866,6 +888,169 @@ async fn rename_file(device_id: String, old_path: String, new_path: String) -> R
     Ok("重命名成功".to_string())
 }
 
+// --- 辅助函数：递归扫描目录 ---
+fn read_dir_recursive(path: &Path) -> Vec<FileNode> {
+    let mut nodes = Vec::new();
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+
+            // 正确判断目录
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            let is_dir = file_type.is_dir();
+
+            // 过滤隐藏文件与无用目录
+            if name.starts_with(".") || name == "build" || name == "dist" {
+                continue;
+            }
+
+            let node = FileNode {
+                title: name.clone(),
+                key: path.to_string_lossy().to_string(),
+                #[cfg_attr(feature = "serde", serde(rename = "isLeaf"))] // 如果你用 serde attrs elsewhere, 否则用上面方案
+                is_leaf: !is_dir,
+                children: if is_dir { Some(read_dir_recursive(&path)) } else { None },
+            };
+
+            nodes.push(node);
+        }
+    }
+
+    // 文件夹排在前
+    nodes.sort_by(|a, b| {
+        if a.is_leaf == b.is_leaf {
+            a.title.cmp(&b.title)
+        } else {
+            a.is_leaf.cmp(&b.is_leaf)
+        }
+    });
+
+    nodes
+}
+
+// 🔥 命令 1: 解包 APK
+#[tauri::command]
+async fn apk_decode(apk_path: String) -> Result<String, String> {
+    // 输出目录: D:\Downloads\app.apk -> D:\Downloads\app_src
+    let output_dir = format!("{}_src", apk_path.trim_end_matches(".apk"));
+    
+    // 先清理旧目录
+    let _ = fs::remove_dir_all(&output_dir);
+
+    // 执行: apktool d -f <apk> -o <out>
+    let output = Command::new("cmd")
+        .args(&["/C", "apktool", "d", "-f", &apk_path, "-o", &output_dir])
+        .output() // 记得加 output()
+        .map_err(|e| e.to_string())?;
+
+    if output.status.success() {
+        Ok(output_dir)
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+// 🔥 命令 2: 扫描解包后的目录 (生成树)
+#[tauri::command]
+async fn scan_local_dir(path: String) -> Result<Vec<FileNode>, String> {
+    let root = Path::new(&path);
+    if !root.exists() {
+        return Err("目录不存在".to_string());
+    }
+    Ok(read_dir_recursive(root))
+}
+
+// 🔥 命令 3: 读取本地文件内容
+#[tauri::command]
+async fn read_local_file(path: String) -> Result<String, String> {
+    // 尝试读取文件为字符串
+    // 注意：如果文件不是 UTF-8 编码（比如图片或二进制），这里会报错
+    fs::read_to_string(&path).map_err(|e| format!("读取失败: {}", e))
+}
+
+// 🔥 命令 4: 保存本地文件内容
+#[tauri::command]
+async fn save_local_file(path: String, content: String) -> Result<(), String> {
+    fs::write(path, content).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn apk_build_sign_install(project_dir: String, device_id: String) -> Result<String, String> {
+    // 1. 回编译 (Build)
+    let dist_apk = format!("{}/dist/signed.apk", project_dir);
+    let unsigned_apk = format!("{}_unsigned.apk", project_dir);
+    
+    let build_res = Command::new("cmd")
+        .args(&["/C", "apktool", "b", &project_dir, "-o", &unsigned_apk])
+        .creation_flags(0x08000000) 
+        .output()
+        .map_err(|e| format!("调用 apktool 失败: {}", e))?;
+
+    if !build_res.status.success() {
+        return Err(format!("回编译失败: {}", String::from_utf8_lossy(&build_res.stderr)));
+    }
+
+    // 2. 签名 (Sign)
+    // 因为运行目录可能是项目根目录，也可能是 src-tauri 目录，我们挨个试
+    let possible_paths = vec![
+        "resources/uber-apk-signer.jar",           // 情况A: CWD 是 src-tauri
+        "src-tauri/resources/uber-apk-signer.jar", // 情况B: CWD 是项目根目录
+        "../resources/uber-apk-signer.jar",        // 情况C: 备用
+    ];
+
+    let mut signer_jar = "";
+    
+    for path in &possible_paths {
+        if std::path::Path::new(path).exists() {
+            signer_jar = path;
+            println!("✅ 找到签名工具: {}", path);
+            break;
+        }
+    }
+
+    if signer_jar.is_empty() {
+        // 如果都没找到，打印详细调试信息
+        let cwd = std::env::current_dir().unwrap_or_default();
+        println!("❌ 错误: 找不到 uber-apk-signer.jar！");
+        println!("当前工作目录: {:?}", cwd);
+        println!("请确保文件存在于 src-tauri/resources/ 下");
+        // 强行指定一个默认值，虽然大概率会失败
+        signer_jar = "resources/uber-apk-signer.jar";
+    }
+    
+    let sign_res = Command::new("java")
+        .args(&["-jar", signer_jar, "-a", &unsigned_apk, "--allowResign"])
+        .creation_flags(0x08000000)
+        .output();
+        
+    let target_apk = if let Ok(res) = sign_res {
+        if res.status.success() {
+            // uber-apk-signer 默认生成 xxx-aligned-debugSigned.apk
+            format!("{}_unsigned-aligned-debugSigned.apk", project_dir)
+        } else {
+            println!("签名警告: {}", String::from_utf8_lossy(&res.stderr));
+            unsigned_apk // 签名失败回退到未签名
+        }
+    } else {
+        unsigned_apk
+    };
+
+    // 3. 安装 (Install)
+    // 使用 -r -t 强制安装测试包
+    let install_res = cmd_exec("adb", &["-s", &device_id, "install", "-r", "-t", &target_apk])?;
+    
+    if install_res.contains("Success") {
+        Ok("编译、签名并安装成功！".to_string())
+    } else {
+        Err(format!("安装失败: {}", install_res))
+    }
+}
+
 // ==========================================
 //  主函数
 // ==========================================
@@ -912,7 +1097,8 @@ fn main() {
             save_file_content, 
             delete_file, 
             create_dir, 
-            rename_file
+            rename_file,
+            apk_decode, scan_local_dir, read_local_file, save_local_file, apk_build_sign_install
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

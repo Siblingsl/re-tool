@@ -7,7 +7,8 @@ export type ViewMode =
   | "install"
   | "show"
   | "script-lab"
-  | "file-manager";
+  | "file-manager"
+  | 'apk-builder';
 
 export interface Device {
   id: string;
