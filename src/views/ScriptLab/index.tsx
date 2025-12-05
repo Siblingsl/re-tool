@@ -106,15 +106,7 @@ const ScriptLab: React.FC<ScriptLabProps> = ({
         style={{ borderRight: "1px solid #f0f0f0" }}
       >
         {/* ... 侧边栏保持不变 ... */}
-        <div
-          style={{
-            padding: 16,
-            borderBottom: "1px solid #eee",
-            fontWeight: "bold",
-          }}
-        >
-          <SnippetsOutlined /> 常用脚本库
-        </div>
+        <div className="content-header">常用脚本库</div>
         <List
           itemLayout="horizontal"
           dataSource={scripts}
@@ -130,16 +122,8 @@ const ScriptLab: React.FC<ScriptLabProps> = ({
       </Sider>
 
       <Content style={{ display: "flex", flexDirection: "column" }}>
-        <div
-          style={{
-            padding: "8px 16px",
-            borderBottom: "1px solid #eee",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
-          <span>Script Editor (JavaScript)</span>
+        <div className="content-header">
+          <span>脚本编辑器 (JavaScript)</span>
           <Space>
             <Button
               icon={<ThunderboltFilled />}

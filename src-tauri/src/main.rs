@@ -20,6 +20,10 @@ use directories::UserDirs;
 use std::fs;
 use std::path::Path;
 use std::env; // 引入 env
+use walkdir::WalkDir;
+use rayon::prelude::*;
+use zip::ZipArchive;
+use mdns_sd::{ServiceDaemon, ServiceEvent};
 
 // --- 状态结构体 ---
 struct AdbState {
@@ -81,6 +85,14 @@ struct FileNode {
     #[serde(rename = "isLeaf")]
     is_leaf: bool, 
     children: Option<Vec<FileNode>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct SearchResult {
+    file_path: String, // 文件完整路径
+    line_num: usize,   // 行号 (如果是文件名匹配则为 0)
+    content: String,   // 匹配行的内容 (或是文件名)
+    match_type: String, // "file" | "code"
 }
 
 // --- 🔥 1. 重命名内部辅助函数 (原 run_command 改为 cmd_exec) ---
@@ -1051,6 +1063,300 @@ async fn apk_build_sign_install(project_dir: String, device_id: String) -> Resul
     }
 }
 
+// 🔥 新增：使用 JADX 反编译为 Java 源码
+#[tauri::command]
+async fn jadx_decompile(apk_path: String) -> Result<String, String> {
+    // 输出目录: D:\Downloads\app.apk -> D:\Downloads\app_jadx_src
+    let output_dir = format!("{}_jadx_src", apk_path.trim_end_matches(".apk"));
+    
+    // 先清理旧目录
+    let _ = fs::remove_dir_all(&output_dir);
+
+    // 命令: jadx -d <out> <apk>
+    // 注意：Windows 下可能需要 cmd /C jadx ...
+    let output = Command::new("cmd")
+        .args(&["/C", "jadx", "-d", &output_dir, &apk_path])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| format!("调用 jadx 失败 (请确保已安装 jadx 并配置环境变量): {}", e))?;
+
+    if output.status.success() {
+        // JADX 的源码通常在 output_dir/sources 目录下
+        // 我们直接返回根目录，让前端自己点进去
+        Ok(output_dir)
+    } else {
+        // JADX 有时候会有很多 warning 输出在 stderr，但不代表失败
+        // 只要目录存在就算成功
+        if std::path::Path::new(&output_dir).exists() {
+            Ok(output_dir)
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).to_string())
+        }
+    }
+}
+
+// 辅助：判断文件是否是文本文件 (简单判断后缀)
+fn is_text_file(path: &str) -> bool {
+    let ext = std::path::Path::new(path).extension().and_then(|s| s.to_str()).unwrap_or("");
+    matches!(ext, "java" | "xml" | "smali" | "json" | "gradle" | "properties" | "txt")
+}
+
+// 🔥 新增：项目全局搜索命令
+#[tauri::command]
+async fn search_project(project_dir: String, query: String) -> Result<Vec<SearchResult>, String> {
+    let query = query.to_lowercase();
+    
+    // 1. 收集所有文件路径 (快速遍历)
+    let entries: Vec<_> = WalkDir::new(&project_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .collect();
+
+    // 2. 并行搜索 (利用所有 CPU 核心)
+    // 使用 par_iter() 替代 iter()
+    let results: Vec<SearchResult> = entries.par_iter()
+        .flat_map(|entry| {
+            let path = entry.path();
+            let path_str = path.to_string_lossy().to_string();
+            let mut local_results = Vec::new();
+
+            // A. 搜文件名
+            if let Some(fname) = path.file_name() {
+                if fname.to_string_lossy().to_lowercase().contains(&query) {
+                     local_results.push(SearchResult {
+                        file_path: path_str.clone(),
+                        line_num: 0,
+                        content: fname.to_string_lossy().to_string(),
+                        match_type: "file".to_string(),
+                    });
+                }
+            }
+
+            // B. 搜内容 (只搜文本文件)
+            if is_text_file(&path_str) {
+                // 读取文件内容 (忽略读取错误)
+                if let Ok(content) = std::fs::read_to_string(path) {
+                    for (i, line) in content.lines().enumerate() {
+                        if line.to_lowercase().contains(&query) {
+                            local_results.push(SearchResult {
+                                file_path: path_str.clone(),
+                                line_num: i + 1,
+                                content: line.trim().to_string(),
+                                match_type: "code".to_string(),
+                            });
+                            // 单个文件限制匹配数，防止大文件刷屏
+                            if local_results.len() > 20 { break; } 
+                        }
+                    }
+                }
+            }
+            local_results
+        })
+        .collect();
+
+    // 截取前 500 条，防止前端渲染卡顿
+    let final_results = results.into_iter().take(500).collect();
+    Ok(final_results)
+}
+
+// 🔥 查壳特征库
+fn get_packer_name(filename: &str) -> Option<&'static str> {
+    match filename {
+        // --- 1. 360 加固 ---
+        s if s.contains("libjiagu.so") 
+          || s.contains("libjiagu_art.so") 
+          || s.contains("libjiagu_x86.so") 
+          || s.contains("libprotectClass.so") => Some("360加固 (360 Jiagu)"),
+
+        // --- 2. 腾讯 (乐固 / 御安全) ---
+        s if s.contains("libtupoke.so") 
+          || s.contains("libshell.so") 
+          || s.contains("libyunjiagu.so") 
+          || s.contains("libtx.so") 
+          || s.contains("libmyunjiagu.so") 
+          || s.contains("mix.dex") // 腾讯有时候把 dex 藏在这里
+          => Some("腾讯乐固 (Tencent Legu)"),
+
+        // --- 3. 梆梆安全 ---
+        s if s.contains("libsecexe.so") 
+          || s.contains("libsecmain.so") 
+          || s.contains("libSecShell.so") 
+          || s.contains("libPenguin.so") => Some("梆梆安全 (Bangcle)"),
+
+        // --- 4. 爱加密 ---
+        s if s.contains("libexec.so") 
+          || s.contains("libijiami.so") 
+          || s.contains("isecmain.so") 
+          || s.contains("ijiami.ajm") => Some("爱加密 (Ijiami)"),
+
+        // --- 5. 网易易盾 (非常常见) ---
+        s if s.contains("libnesec.so") 
+          || s.contains("libnh.so") 
+          || s.contains("libdata.so") // 易盾有时用这个名字
+          => Some("网易易盾 (NetEase YiDun)"),
+
+        // --- 6. 阿里聚安全 / 阿里无线 ---
+        s if s.contains("libsgmain.so") 
+          || s.contains("libsgsecuritybody.so") 
+          || s.contains("libmobisec.so") 
+          || s.contains("libfakejni.so") => Some("阿里聚安全 (Aliyun)"),
+
+        // --- 7. 百度加固 ---
+        s if s.contains("libbaiduprotect.so") => Some("百度加固 (Baidu)"),
+
+        // --- 8. 顶象 ---
+        s if s.contains("libx3g.so") 
+          || s.contains("libdx-guard.so") => Some("顶象 (DingXiang)"),
+
+        // --- 9. 纳迦 (Naga) / 海云安 ---
+        s if s.contains("libddog.so") 
+          || s.contains("libfdog.so") 
+          || s.contains("libedog.so") => Some("纳迦 (Naga)"),
+
+        // --- 10. 几维安全 ---
+        s if s.contains("libkws.so") 
+          || s.contains("libkwscmm.so") 
+          || s.contains("libkwscr.so") => Some("几维安全 (KiwiSec)"),
+
+        // --- 11. 其它较冷门的加固 ---
+        s if s.contains("libapktool.so") => Some("Apktool Plus 加固"),
+        s if s.contains("libprotectapis.so") => Some("不知名加固 (ProtectApis)"),
+        s if s.contains("libu8_") => Some("U8SDK 聚合"),
+        s if s.contains("libshfinal.so") => Some("瑞星加固"),
+        s if s.contains("libapkshell.so") => Some("APKProtect"),
+        s if s.contains("libinwp001.so") => Some("硕云科技"),
+
+        // --- 12. 开发框架识别 (辅助判断) ---
+        s if s.contains("libflutter.so") || s.contains("libapp.so") => Some("Flutter 框架 (非壳)"),
+        s if s.contains("libreactnativejni.so") => Some("React Native (非壳)"),
+        s if s.contains("libmonosgen-2.0.so") || s.contains("libunity.so") => Some("Unity3D 游戏 (非壳)"),
+        s if s.contains("libxamarin") => Some("Xamarin (非壳)"),
+
+        _ => None,
+    }
+}
+
+// 🔥 命令 1: 查壳
+#[tauri::command]
+async fn detect_packer(apk_path: String) -> Result<String, String> {
+    let file = File::open(&apk_path).map_err(|e| format!("无法打开文件: {}", e))?;
+    let reader = BufReader::new(file);
+    let mut archive = ZipArchive::new(reader).map_err(|e| format!("APK 解析失败: {}", e))?;
+
+    let mut detected = Vec::new();
+
+    for i in 0..archive.len() {
+        let file = archive.by_index(i).unwrap();
+        let name = file.name();
+        if let Some(packer) = get_packer_name(name) {
+            if !detected.contains(&packer.to_string()) {
+                detected.push(packer.to_string());
+            }
+        }
+    }
+
+    if detected.is_empty() {
+        Ok("未发现常见加固特征 (可能是原包或未知壳)".to_string())
+    } else {
+        Ok(detected.join(", "))
+    }
+}
+
+// 🔥 命令 2: 拉取并整理 Dex 文件
+#[tauri::command]
+async fn pull_and_organize_dex(device_id: String, pkg: String) -> Result<String, String> {
+    // 1. 定义手机端 Dump 目录
+    let remote_dump_dir = format!("/data/data/{}/files/dump_dex", pkg);
+    
+    // 2. 定义电脑端保存目录 (Downloads/Dump_PkgName_Time)
+    let user_dirs = UserDirs::new().ok_or("无法获取用户目录")?;
+    let download_dir = user_dirs.download_dir().ok_or("无法获取下载目录")?;
+    
+    let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let local_folder_name = format!("{}_dump_{}", pkg, timestamp);
+    let local_save_path = download_dir.join(&local_folder_name);
+    
+    // 创建本地目录
+    fs::create_dir_all(&local_save_path).map_err(|e| e.to_string())?;
+    let local_save_str = local_save_path.to_string_lossy().to_string();
+
+    // 3. 执行 adb pull
+    // 注意：因为 /data/data 需要 root 权限，普通 pull 可能失败。
+    // 建议先用 su 把文件复制到 /data/local/tmp/ 再 pull，或者直接 su -c tar
+    
+    // 方案：先 cp 到 tmp (确保有读写权限)
+    let remote_tmp = format!("/data/local/tmp/{}_dump", pkg);
+    cmd_exec("adb", &["-s", &device_id, "shell", "su", "-c", &format!("rm -rf {}; cp -r {} {}", remote_tmp, remote_dump_dir, remote_tmp)])?;
+    cmd_exec("adb", &["-s", &device_id, "shell", "su", "-c", &format!("chmod -R 777 {}", remote_tmp)])?;
+    
+    let pull_res = cmd_exec("adb", &["-s", &device_id, "pull", &remote_tmp, &local_save_str])?;
+    
+    // 清理手机临时文件
+    cmd_exec("adb", &["-s", &device_id, "shell", "rm -rf", &remote_tmp])?;
+
+    // 4. 整理文件名 (把莫名其妙的名字改成 classes.dex, classes2.dex)
+    // 遍历下载下来的文件夹
+    if let Ok(entries) = fs::read_dir(&local_save_path) {
+        let mut index = 1;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("dex") {
+                let new_name = if index == 1 { "classes.dex".to_string() } else { format!("classes{}.dex", index) };
+                let new_path = local_save_path.join(new_name);
+                let _ = fs::rename(path, new_path);
+                index += 1;
+            }
+        }
+    }
+
+    if pull_res.contains("pulled") {
+        Ok(local_save_str)
+    } else {
+        Err(format!("拉取失败 (请确认应用是否运行且脱壳脚本已执行): {}", pull_res))
+    }
+}
+
+
+// 🔥 新增：启动局域网扫描服务
+fn start_mdns_discovery(app: tauri::AppHandle) {
+    thread::spawn(move || {
+        // 创建 mDNS 守护进程
+        let mdns = ServiceDaemon::new().expect("Failed to create mDNS daemon");
+        
+        // 监听 _adb._tcp.local. 服务类型
+        let service_type = "_adb._tcp.local.";
+        let receiver = mdns.browse(service_type).expect("Failed to browse");
+
+        println!("正在扫描局域网 ADB 设备...");
+
+        while let Ok(event) = receiver.recv() {
+            match event {
+                ServiceEvent::ServiceResolved(info) => {
+                    // 获取到设备 IP 和端口
+                    // 格式通常是: device_id._adb._tcp.local.
+                    // info.get_addresses() 返回 IP 列表
+                    // info.get_port() 返回端口
+                    
+                    if let Some(addr) = info.get_addresses().iter().next() {
+                        let port = info.get_port();
+                        let connect_addr = format!("{}:{}", addr, port);
+                        println!("发现设备: {} ({})", info.get_fullname(), connect_addr);
+
+                        // 尝试自动连接
+                        // 注意：这里可能会频繁触发，建议加个缓存判断是否已连接
+                        let _ = cmd_exec("adb", &["connect", &connect_addr]);
+                        
+                        // 通知前端刷新列表
+                        let _ = app.emit("device-changed", ());
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+}
+
 // ==========================================
 //  主函数
 // ==========================================
@@ -1063,7 +1369,10 @@ fn main() {
         })
         .setup(|app| {
             let handle = app.handle().clone();
-            start_device_monitor(handle);
+            // 启动原本的设备状态监听
+            start_device_monitor(handle.clone());
+            // 启动 mDNS 自动发现
+            start_mdns_discovery(handle);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1098,7 +1407,15 @@ fn main() {
             delete_file, 
             create_dir, 
             rename_file,
-            apk_decode, scan_local_dir, read_local_file, save_local_file, apk_build_sign_install
+            apk_decode, 
+            scan_local_dir, 
+            read_local_file, 
+            save_local_file, 
+            apk_build_sign_install,
+            jadx_decompile,
+            search_project,
+            detect_packer,
+            pull_and_organize_dex
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

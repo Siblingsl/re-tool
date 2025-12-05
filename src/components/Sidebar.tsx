@@ -24,6 +24,7 @@ import {
   ExperimentOutlined,
   FolderOpenOutlined,
   BuildOutlined,
+  CoffeeOutlined,
 } from "@ant-design/icons";
 import {
   Avatar,
@@ -838,6 +839,22 @@ const Sidebar: React.FC<SidebarProps> = ({
         onClick={() => onViewChange("apk-builder")}
       >
         <BuildOutlined /> <span>APK 改包工坊</span>
+      </div>
+      <div
+        className={`nav-item ${
+          currentView === "java-analyzer" ? "active" : ""
+        }`}
+        onClick={() => onViewChange("java-analyzer")}
+      >
+        <CoffeeOutlined /> <span>Java 源码分析 (JADX)</span>
+      </div>
+      <div
+        className={`nav-item ${
+          currentView === "packer-lab" ? "active" : ""
+        }`}
+        onClick={() => onViewChange("packer-lab")}
+      >
+        <ToolOutlined /> <span>壳工坊</span>
       </div>
       <div
         className={`nav-item ${

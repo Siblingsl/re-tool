@@ -256,16 +256,7 @@ const ApkBuilder: React.FC<ApkBuilderProps> = ({ currentDevice }) => {
   return (
     <Layout style={{ height: "100%", background: "#fff" }}>
       {/* 顶部工具栏 */}
-      <div
-        style={{
-          padding: "12px 24px",
-          borderBottom: "1px solid #eee",
-          background: "#fafafa",
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-        }}
-      >
+      <div className="content-header">
         <Steps
           current={step}
           size="small"

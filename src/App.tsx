@@ -15,6 +15,8 @@ import { ViewMode, Device } from "./types";
 import ScriptLab from "./views/ScriptLab";
 import FileExplorer from "./views/FileExplorer";
 import ApkBuilder from "./views/ApkBuilder";
+import JavaAnalyzer from "./views/JavaAnalyzer";
+import PackerLab from "./views/PackerLab";
 
 // 定义脚本接口
 export interface ScriptItem {
@@ -240,6 +242,12 @@ const App: React.FC = () => {
 
         {currentView === "apk-builder" && (
           <ApkBuilder currentDevice={currentDevice} />
+        )}
+
+        {currentView === "java-analyzer" && <JavaAnalyzer />}
+
+        {currentView === "packer-lab" && (
+          <PackerLab currentDevice={currentDevice} />
         )}
 
         {currentView === "show" && currentDevice && (
