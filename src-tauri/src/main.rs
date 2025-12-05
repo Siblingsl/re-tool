@@ -17,7 +17,7 @@ use xz2::read::XzDecoder;
 use std::io::{BufRead, BufReader};
 use std::process::Stdio;
 use directories::UserDirs;
-use std::path::PathBuf;
+use std::fs;
 
 // --- 状态结构体 ---
 struct AdbState {
@@ -781,6 +781,91 @@ async fn get_file_list(device_id: String, path: String) -> Result<Vec<FileItem>,
     Ok(files)
 }
 
+// 🔥 新增：读取文件内容 (支持 Root)
+#[tauri::command]
+async fn read_file_content(device_id: String, path: String) -> Result<String, String> {
+    // 尝试用 cat 命令读取
+    // 如果文件是二进制或者太大，这里可能需要做限制，但作为 MVP 先读文本
+    let cmd = format!("su -c 'cat \"{}\"'", path);
+    let mut output = cmd_exec("adb", &["-s", &device_id, "shell", &cmd])?;
+
+    // 如果 su 失败，尝试普通 cat
+    if output.contains("denied") || output.contains("not found") {
+        output = cmd_exec("adb", &["-s", &device_id, "shell", "cat", &path])?;
+    }
+
+    // 简单的错误检查
+    if output.contains("No such file") || output.contains("Is a directory") {
+        return Err(format!("无法读取文件: {}", output));
+    }
+
+    // 限制返回大小，防止前端卡死 (比如最大 1MB)
+    if output.len() > 1024 * 1024 {
+        return Err("文件太大，请下载到电脑查看".to_string());
+    }
+
+    Ok(output)
+}
+
+// 🔥 新增：保存文件内容 (修改文件)
+// 逻辑：写入本地临时文件 -> adb push 到手机临时目录 -> su mv 到目标目录 (为了绕过权限问题)
+#[tauri::command]
+async fn save_file_content(device_id: String, path: String, content: String) -> Result<String, String> {
+    let temp_dir = std::env::temp_dir();
+    // 生成随机文件名避免冲突
+    let temp_name = format!("adb_edit_{}.tmp", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+    let local_temp_path = temp_dir.join(&temp_name);
+    
+    // 1. 写入本地临时文件
+    fs::write(&local_temp_path, content).map_err(|e| format!("本地写入失败: {}", e))?;
+    
+    let local_path_str = local_temp_path.to_string_lossy().to_string();
+    let remote_temp = format!("/data/local/tmp/{}", temp_name);
+
+    // 2. 推送到手机临时目录
+    let push_res = cmd_exec("adb", &["-s", &device_id, "push", &local_path_str, &remote_temp])?;
+    if push_res.to_lowercase().contains("error") {
+         return Err(format!("Push 失败: {}", push_res));
+    }
+
+    // 3. 使用 Root 权限移动到目标位置 (覆盖原文件)
+    let mv_res = cmd_exec("adb", &["-s", &device_id, "shell", "su", "-c", &format!("mv '{}' '{}'", remote_temp, path)])?;
+    
+    // 清理本地临时文件
+    let _ = fs::remove_file(local_temp_path);
+
+    if mv_res.trim().is_empty() {
+        Ok("保存成功".to_string())
+    } else {
+        // mv 命令通常没有输出，如果有输出可能是报错
+        Ok(format!("保存可能成功 (Log: {})", mv_res))
+    }
+}
+
+// 🔥 新增：删除文件/文件夹
+#[tauri::command]
+async fn delete_file(device_id: String, path: String) -> Result<String, String> {
+    // rm -rf <path>
+    cmd_exec("adb", &["-s", &device_id, "shell", "su", "-c", &format!("rm -rf '{}'", path)])?;
+    Ok("删除成功".to_string())
+}
+
+// 🔥 新增：新建文件夹
+#[tauri::command]
+async fn create_dir(device_id: String, path: String) -> Result<String, String> {
+    // mkdir -p <path>
+    cmd_exec("adb", &["-s", &device_id, "shell", "su", "-c", &format!("mkdir -p '{}'", path)])?;
+    Ok("创建成功".to_string())
+}
+
+// 🔥 新增：重命名
+#[tauri::command]
+async fn rename_file(device_id: String, old_path: String, new_path: String) -> Result<String, String> {
+    // mv <old> <new>
+    cmd_exec("adb", &["-s", &device_id, "shell", "su", "-c", &format!("mv '{}' '{}'", old_path, new_path)])?;
+    Ok("重命名成功".to_string())
+}
+
 // ==========================================
 //  主函数
 // ==========================================
@@ -822,7 +907,12 @@ fn main() {
             get_foreground_app,
             extract_apk,
             open_file_explorer,
-            get_file_list
+            get_file_list,
+            read_file_content,
+            save_file_content, 
+            delete_file, 
+            create_dir, 
+            rename_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
