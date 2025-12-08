@@ -1031,17 +1031,7 @@ const NetworkSniffer: React.FC<NetworkSnifferProps> = ({
         userSelect: isResizing ? "none" : "auto",
       }}
     >
-      <div
-        style={{
-          height: 48,
-          borderBottom: "1px solid #e8e8e8",
-          display: "flex",
-          alignItems: "center",
-          padding: "0 16px",
-          justifyContent: "space-between",
-          background: "#fafafa",
-        }}
-      >
+      <div className="content-header">
         <Space>
           <Select
             value={targetDeviceId}
