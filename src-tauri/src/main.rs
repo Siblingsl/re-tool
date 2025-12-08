@@ -1595,8 +1595,14 @@ async fn replay_request(
     url: String,
     headers: std::collections::HashMap<String, String>,
     body: Option<String>,
+    proxy_port: u16,
 ) -> Result<String, String> {
+    let proxy_url = format!("http://127.0.0.1:{}", proxy_port);
+    let proxy = reqwest::Proxy::all(&proxy_url)
+        .map_err(|e| format!("代理配置错误: {}", e))?;
+
     let client = reqwest::Client::builder()
+        .proxy(proxy)
         .danger_accept_invalid_certs(true) // 忽略 SSL 证书错误 (这对逆向很重要)
         .build()
         .map_err(|e| e.to_string())?;
@@ -1608,15 +1614,18 @@ async fn replay_request(
     // 2. 构建 Headers
     let mut header_map = HeaderMap::new();
     for (k, v) in headers {
-        // 过滤掉可能导致冲突的 Header，由 Client 自动处理
-        if k.to_lowercase() == "content-length" || k.to_lowercase() == "host" {
+        let k_lower = k.to_lowercase();
+        
+        // 🔥🔥 关键修改：过滤掉 Accept-Encoding 🔥🔥
+        // 让 reqwest 自动处理压缩和解压，不要手动干预
+        if k_lower == "content-length" || k_lower == "host" || k_lower == "accept-encoding" {
             continue;
         }
+        
         if let (Ok(hn), Ok(hv)) = (HeaderName::from_str(&k), HeaderValue::from_str(&v)) {
             header_map.insert(hn, hv);
         }
     }
-
     // 3. 构建 Request Builder
     let mut builder = client.request(req_method, &url).headers(header_map);
 
@@ -1635,11 +1644,31 @@ async fn replay_request(
 
     // 5. 发送请求
     let resp = builder.send().await.map_err(|e| format!("发送失败: {}", e))?;
-    
     let status = resp.status();
-    let resp_text = resp.text().await.unwrap_or_default();
 
-    Ok(format!("状态码: {}\n\n响应内容 (前500字符):\n{}", status, &resp_text.chars().take(500).collect::<String>()))
+    // 获取 Content-Type 用来判断是不是二进制
+    let content_type = resp.headers().get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    // 读取所有字节
+    let bytes = resp.bytes().await.map_err(|e| format!("读取失败: {}", e))?;
+
+    // 🔥 智能判断：如果是 JSON/HTML/Text，转字符串；否则转 Base64
+    let body_str = if content_type.contains("json") || content_type.contains("text") || content_type.contains("xml") || content_type.contains("javascript") {
+        String::from_utf8_lossy(&bytes).to_string()
+    } else {
+        // 如果是 Protobuf 或图片，返回 Base64 并在前面加标记，方便前端识别
+        // 你的前端 NetworkSniffer 已经支持识别 "base64:" 前缀了
+        format!("base64:{}", general_purpose::STANDARD.encode(&bytes))
+    };
+
+    // 截取前 2000 个字符用于预览 (太长了弹窗会卡)
+    let preview_len = body_str.len().min(2000); 
+    let preview = &body_str[..preview_len];
+
+    Ok(format!("状态码: {}\nContent-Type: {}\n\n响应内容 (预览):\n{}", status, content_type, preview))
 }
 
 // ==========================================

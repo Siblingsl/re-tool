@@ -32,6 +32,6 @@ rayon = "1.7"    # 并行计算库
 zip = "0.6"
 mdns-sd = "0.9"
 tauri-plugin-shell = "2.0"
-reqwest = { version = "0.12", features = ["json", "multipart", "stream"] } # 推荐使用最新版
+reqwest = { version = "0.12", features = ["json", "multipart", "stream", "gzip", "brotli", "deflate"] } # 推荐使用最新版
 tokio = { version = "1", features = ["full"] } # Tauri v2 通常自带，确认一下
 base64 = "0.22"
