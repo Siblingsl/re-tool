@@ -25,6 +25,7 @@ import {
   FolderOpenOutlined,
   BuildOutlined,
   CoffeeOutlined,
+  GatewayOutlined,
 } from "@ant-design/icons";
 import {
   Avatar,
@@ -829,6 +830,14 @@ const Sidebar: React.FC<SidebarProps> = ({
       {/* ... 工具箱 ... */}
       <div className="sidebar-section-title">工具箱</div>
       <div
+        className={`nav-item ${
+          currentView === "network-sniffer" ? "active" : ""
+        }`}
+        onClick={() => onViewChange("network-sniffer")}
+      >
+        <GatewayOutlined /> <span>一键抓包 (Mitmproxy)</span>
+      </div>
+      <div
         className={`nav-item ${currentView === "script-lab" ? "active" : ""}`}
         onClick={() => onViewChange("script-lab")}
       >
@@ -849,9 +858,7 @@ const Sidebar: React.FC<SidebarProps> = ({
         <CoffeeOutlined /> <span>Java 源码分析 (JADX)</span>
       </div>
       <div
-        className={`nav-item ${
-          currentView === "packer-lab" ? "active" : ""
-        }`}
+        className={`nav-item ${currentView === "packer-lab" ? "active" : ""}`}
         onClick={() => onViewChange("packer-lab")}
       >
         <ToolOutlined /> <span>壳工坊</span>

@@ -17,6 +17,7 @@ import FileExplorer from "./views/FileExplorer";
 import ApkBuilder from "./views/ApkBuilder";
 import JavaAnalyzer from "./views/JavaAnalyzer";
 import PackerLab from "./views/PackerLab";
+import NetworkSniffer from "./views/NetworkSniffer";
 
 // 定义脚本接口
 export interface ScriptItem {
@@ -225,6 +226,9 @@ const App: React.FC = () => {
               )}
             </div>
           ))}
+        {currentView === "network-sniffer" && (
+          <NetworkSniffer devices={devices} deviceAliases={deviceAliases} /> // ✅ 把设备列表传进去
+        )}
         {currentView === "file-manager" && currentDevice && (
           <FileExplorer
             deviceId={currentDevice.id}

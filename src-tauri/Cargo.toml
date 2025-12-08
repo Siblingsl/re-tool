@@ -23,7 +23,6 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0" 
 tauri-plugin-dialog = "2"
-reqwest = { version = "0.11", features = ["json", "stream"] }
 xz2 = "0.1"
 tempfile = "3.8"
 directories = "5.0"  # 用于获取系统标准目录(如Downloads)
@@ -32,3 +31,7 @@ walkdir = "2.3"  # 高效的文件遍历
 rayon = "1.7"    # 并行计算库
 zip = "0.6"
 mdns-sd = "0.9"
+tauri-plugin-shell = "2.0"
+reqwest = { version = "0.12", features = ["json", "multipart", "stream"] } # 推荐使用最新版
+tokio = { version = "1", features = ["full"] } # Tauri v2 通常自带，确认一下
+base64 = "0.22"

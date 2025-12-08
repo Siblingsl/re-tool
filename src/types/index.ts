@@ -10,7 +10,8 @@ export type ViewMode =
   | "file-manager"
   | "apk-builder"
   | "java-analyzer"
-  | "packer-lab";
+  | "packer-lab"
+  | "network-sniffer";
 
 export interface Device {
   id: string;
@@ -49,4 +50,22 @@ export interface FileItem {
   size: string;
   permissions: string;
   date: string;
+}
+
+// 🔥 新增：网络请求结构
+export interface NetworkRequest {
+  id: string; // 唯一 ID (UUID)
+  method: string; // GET, POST...
+  url: string; // 完整 URL
+  host: string; // 域名
+  path: string; // 路径
+  scheme: string; // http/https
+  status?: number; // 响应状态码 (200, 404...)
+  startTime: number; // 开始时间戳
+  duration?: number; // 耗时 (ms)
+  requestHeaders: Record<string, string>;
+  requestBody?: string;
+  responseHeaders?: Record<string, string>;
+  responseBody?: string;
+  contentType?: string; // application/json...
 }
