@@ -7,6 +7,8 @@ mod commands;
 
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
+use tauri::Manager;
+use crate::state::{UnidbgState};
 use state::{AdbState, MitmState};
 use commands::*; // 引入所有模块的命令
 
@@ -20,6 +22,10 @@ fn main() {
         .manage(AdbState { 
             sockets: Arc::new(Mutex::new(HashMap::new())) 
         })
+        .manage(UnidbgState {
+            child: Arc::new(Mutex::new(None)),
+            server_child: Mutex::new(None),
+        })
         .setup(|app| {
             let handle = app.handle().clone();
             // 启动设备监控
@@ -29,6 +35,9 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // ai
+            ai::call_gemini_service,
+
             // Device
             device::get_all_devices,
             device::enable_wireless_mode,
@@ -77,6 +86,8 @@ fn main() {
             apk::search_project,
             apk::detect_packer,
             apk::pull_and_organize_dex,
+            apk::get_apk_path,   // 注册
+            apk::lists_so_files,
 
             // Network / Mitm
             network::start_mitmproxy,
@@ -88,8 +99,47 @@ fn main() {
 
             // Common
             commands::run_command,
-            commands::open_file_explorer
+            commands::open_file_explorer,
+
+            // unidbg
+            unidbg::create_project,
+            unidbg::check_project_valid,
+            unidbg::read_code,
+            unidbg::save_code,
+            unidbg::import_so_file,
+            unidbg::list_so_files,
+            unidbg::delete_so_file,
+            unidbg::run_server,
+            unidbg::stop_server,
+            unidbg::unidbg_request
+            
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            match event {
+                // --- 3. 监听退出事件 ---
+                tauri::RunEvent::ExitRequested { .. } => {
+                    println!("[Main] App is exiting, cleaning up child processes...");
+
+                    // 清理 Mitmproxy
+                    let mitm_state = app_handle.state::<MitmState>();
+                    let mut mitm_child = mitm_state.child.lock().unwrap();
+                    if let Some(child) = mitm_child.take() {
+                        // child.kill() 可能会失败（例如进程早退出了），用 Result 忽略错误
+                        let _ = child.kill(); 
+                        println!("[Main] Mitmproxy process killed.");
+                    }
+
+                    // 清理 Unidbg
+                    let unidbg_state = app_handle.state::<UnidbgState>();
+                    let mut unidbg_child = unidbg_state.child.lock().unwrap();
+                    if let Some(child) = unidbg_child.take() {
+                        let _ = child.kill();
+                        println!("[Main] Unidbg process killed.");
+                    }
+                }
+                _ => {}
+            }
+        });
 }

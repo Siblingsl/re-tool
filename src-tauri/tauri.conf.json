@@ -34,10 +34,20 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "resources/*"
+      "resources/*",
+      "templates/*",
+      "templates/**/*"
     ],
     "externalBin": [
       "bin/mitmdump"
     ]
+  },
+  "plugins": {
+    "fs": {
+      "scope": [
+        "$APP/*",
+        "$APPDATA/*"
+      ]
+    }
   }
 }

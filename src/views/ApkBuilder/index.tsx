@@ -27,6 +27,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Device } from "../../types";
 import { askAiAssistant, AiTaskType } from "../../services/aiService";
+import { Header } from "antd/es/layout/layout";
 
 const { Sider, Content } = Layout;
 
@@ -256,7 +257,7 @@ const ApkBuilder: React.FC<ApkBuilderProps> = ({ currentDevice }) => {
   return (
     <Layout style={{ height: "100%", background: "#fff" }}>
       {/* 顶部工具栏 */}
-      <div className="content-header">
+      <Header className="content-header">
         <Steps
           current={step}
           size="small"
@@ -285,7 +286,7 @@ const ApkBuilder: React.FC<ApkBuilderProps> = ({ currentDevice }) => {
             一键编译安装
           </Button>
         </Space>
-      </div>
+      </Header>
 
       <Layout>
         <Sider

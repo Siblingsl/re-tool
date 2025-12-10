@@ -8,7 +8,7 @@ use zip::ZipArchive;
 use directories::UserDirs;
 use walkdir::WalkDir;
 use rayon::prelude::*;
-use crate::models::{FileNode, SearchResult};
+use crate::models::{FileNode, SearchResult, SoFile};
 use crate::utils::{cmd_exec, get_packer_name, is_text_file};
 
 // 递归扫描目录 
@@ -343,4 +343,100 @@ pub async fn pull_and_organize_dex(device_id: String, pkg: String) -> Result<Str
     } else {
         Err(format!("拉取失败 (请确认应用是否运行且脱壳脚本已执行): {}", pull_res))
     }
+}
+
+
+// 1. 获取 APK 路径 (辅助函数，也可单独调用)
+#[tauri::command]
+pub async fn get_apk_path(device_id: String, pkg: String) -> Result<String, String> {
+    let output = cmd_exec("adb", &["-s", &device_id, "shell", "pm", "path", &pkg])?;
+    // 输出示例: package:/data/app/~~xxx/com.example/base.apk
+    // 可能有多行 (split apk)，我们取 base.apk
+    
+    for line in output.lines() {
+        if let Some(path) = line.trim().strip_prefix("package:") {
+            if path.ends_with("base.apk") || !output.contains("base.apk") {
+                return Ok(path.to_string());
+            }
+        }
+    }
+    Err("未找到 APK 路径".to_string())
+}
+
+// 2. 列出 APK 内部的 SO 文件 (核心功能)
+#[tauri::command]
+pub async fn lists_so_files(device_id: String, apk_path: String) -> Result<Vec<SoFile>, String> {
+    println!(">>> 正在通过 Pull 方式获取 SO 列表，源路径: {}", apk_path);
+
+    // 1. 获取安全的临时路径 (改用 Downloads 目录，避开 Temp 权限坑)
+    let user_dirs = UserDirs::new().ok_or("无法获取用户目录")?;
+    let download_dir = user_dirs.download_dir().ok_or("无法获取下载目录")?;
+    
+    // 生成一个带时间戳的文件名，防止冲突
+    let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let temp_filename = format!("temp_scan_{}.apk", timestamp);
+    let temp_apk_path = download_dir.join(&temp_filename);
+    let temp_apk_str = temp_apk_path.to_string_lossy().to_string();
+
+    println!(">>> 本地临时保存路径: {}", temp_apk_str);
+
+    // 2. Pull APK 到电脑
+    let pull_res = cmd_exec("adb", &["-s", &device_id, "pull", &apk_path, &temp_apk_str]);
+    
+    if let Err(e) = pull_res {
+        return Err(format!("拉取 APK 失败: {}", e));
+    }
+
+    // 🔥 关键修复：Windows 上写完文件后可能不会立即释放锁，稍微等待一下
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // 3. 使用 Rust zip 库解析
+    // 这里的 File::open 之前报错了，现在换了目录应该没问题
+    let file = fs::File::open(&temp_apk_path).map_err(|e| format!("无法打开本地 APK 文件 (权限拒绝): {}", e))?;
+    let reader = BufReader::new(file);
+    let mut archive = ZipArchive::new(reader).map_err(|e| format!("APK 解析失败 (不是有效的ZIP): {}", e))?;
+
+    let mut so_list = Vec::new();
+    // 尝试获取 APK 在手机上的基础目录名
+    let base_dir = apk_path.rsplitn(2, '/').nth(1).unwrap_or(""); 
+
+    for i in 0..archive.len() {
+        let file = archive.by_index(i).unwrap();
+        let name = file.name().to_string();
+
+        // 过滤 .so 文件 (通常在 lib/ 目录下)
+        if name.ends_with(".so") && name.contains("lib/") {
+            let file_name = name.split('/').last().unwrap().to_string();
+            let size = file.size().to_string();
+
+            // 识别架构
+            let arch = if name.contains("arm64") { "arm64-v8a" }
+            else if name.contains("armeabi") { "armeabi-v7a" }
+            else if name.contains("x86_64") { "x86_64" }
+            else if name.contains("x86") { "x86" }
+            else { "unknown" };
+
+            // 构造推测的磁盘路径 (仅供参考)
+            let disk_arch = if arch == "arm64-v8a" { "arm64" } else { "arm" };
+            let disk_path = format!("{}/lib/{}/{}", base_dir, disk_arch, file_name);
+
+            so_list.push(SoFile {
+                name: file_name,
+                zip_path: name,
+                disk_path,
+                size,
+                arch: arch.to_string(),
+            });
+        }
+    }
+
+    // 4. 解析完成后删除临时文件
+    // 即使删除失败也不影响功能，只是多占用一点磁盘空间
+    let _ = fs::remove_file(temp_apk_path);
+
+    // 排序
+    so_list.sort_by(|a, b| a.name.cmp(&b.name));
+
+    println!(">>> 扫描完成，找到 {} 个 SO 文件", so_list.len());
+    Ok(so_list)
 }

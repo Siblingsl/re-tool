@@ -8,6 +8,28 @@
   "permissions": [
     "core:default",
     "opener:default",
-    "dialog:default"
+    "dialog:default",
+    "shell:allow-execute",
+    "shell:allow-open",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "java",
+          "args": true,
+          "sidecar": false
+        },
+        {
+          "name": "mvn",
+          "cmd": "mvn",
+          "args": true
+        },
+        {
+          "name": "mvn.cmd",
+          "cmd": "mvn.cmd",
+          "args": true
+        }
+      ]
+    }
   ]
 }

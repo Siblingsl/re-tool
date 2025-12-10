@@ -31,15 +31,15 @@ import {
   FileTextOutlined,
   DownloadOutlined,
 } from "@ant-design/icons";
-import { AppInfo, ViewMode, AppDetail, Device } from "../../types"; // 引入 Device 和 AppDetail
+import { AppInfo, ViewMode, AppDetail, Device } from "../../types";
 import { invoke } from "@tauri-apps/api/core";
 import FridaConsole from "./FridaConsole";
 import FileExplorer from "../FileExplorer";
+import SoViewer from "./SoViewer"; // 🔥 引入新组件
 
 interface AppDrawerProps {
   visible: boolean;
   app: AppInfo | null;
-  // 🔥 新增：需要 device 信息来执行 adb 命令
   device: Device | null;
   scripts: { id: string; name: string; code: string }[];
   onClose: () => void;
@@ -57,19 +57,18 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
   // 详情数据状态
   const [detail, setDetail] = useState<AppDetail | null>(null);
   const [loading, setLoading] = useState(false);
-  // 🔥 新增状态：控制控制台显示
-  const [consoleVisible, setConsoleVisible] = useState(false);
-  // 🔥 新增：用于挂载控制台的容器引用
-  const drawerContainerRef = useRef<HTMLDivElement>(null);
 
-  // 🔥 新增：当前选中的脚本 ID
+  // 🔥 核心修改 1：状态升级
+  // null = 关闭右侧, 'console' = Frida控制台, 'so' = SO查看器
+  const [rightPanel, setRightPanel] = useState<null | "console" | "so">(null);
+
+  // 当前选中的脚本 ID
   const [selectedScriptId, setSelectedScriptId] = useState<string>(
     scripts[0]?.id || ""
   );
-  // 获取当前脚本内容
   const currentScript = scripts.find((s) => s.id === selectedScriptId);
 
-  // --- 通用执行逻辑 ---
+  // --- Frida 执行逻辑 ---
   const runFrida = async (mode: "spawn" | "attach") => {
     if (!app || !device || !currentScript) return;
 
@@ -79,16 +78,14 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
     );
 
     try {
-      // 1. 如果是 Spawn，先重启应用
+      // 1. Spawn 模式重启应用
       if (mode === "spawn") {
-        // 先杀
         try {
           await invoke("run_command", {
             cmd: "adb",
             args: ["-s", device.id, "shell", "am", "force-stop", app.pkg],
           });
         } catch {}
-        // 再起 (使用 monkey 或 am start)
         await invoke("run_command", {
           cmd: "adb",
           args: [
@@ -103,12 +100,10 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
             "1",
           ],
         });
-        // 等待应用启动
         await new Promise((r) => setTimeout(r, 1000));
       }
 
-      // 2. 调用后端注入脚本 (假设你实现了 run_frida_script)
-      // 注意：这里我们把脚本内容直接传过去，或者传路径
+      // 2. 注入脚本
       const result = await invoke("run_frida_script", {
         deviceId: device.id,
         packageName: app.pkg,
@@ -118,20 +113,22 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
       hide();
       message.success(`${currentScript.name} 注入成功！`);
       console.log("Frida Output:", result);
-      // 🔥 成功后，打开控制台抽屉
-      setConsoleVisible(true);
+
+      // 🔥 成功后，打开控制台面板
+      setRightPanel("console");
     } catch (e: any) {
       hide();
       message.error(`注入失败: ${e}`);
     }
   };
 
-  // 当 app 或 visible 变化时，加载详情
+  // 加载详情
   useEffect(() => {
     if (visible && app && device) {
       fetchDetail();
     } else {
-      setDetail(null); // 关闭时清空
+      setDetail(null);
+      setRightPanel(null); // 关闭抽屉时重置右侧
     }
   }, [visible, app, device]);
 
@@ -161,27 +158,20 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
       });
       message.success("卸载成功");
       onClose();
-      // 最好能触发父组件刷新列表，这里暂略
     } catch (e) {
       message.error("卸载失败");
     }
   };
 
-  // --- 处理提取 APK ---
   const handleExtractApk = async () => {
     if (!app || !device) return;
     const hide = message.loading(`正在提取 ${app.name} 的 APK...`, 0);
-
     try {
-      // 1. 调用后端
       const savePath = await invoke<string>("extract_apk", {
         deviceId: device.id,
         pkg: app.pkg,
       });
-
       hide();
-
-      // 2. 成功弹窗
       Modal.success({
         title: "提取成功",
         content: (
@@ -203,57 +193,15 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
         okText: "打开所在文件夹",
         cancelText: "关闭",
         closable: true,
-        onOk: () => {
-          // 调用后端打开文件夹
-          invoke("open_file_explorer", { path: savePath });
-        },
+        onOk: () => invoke("open_file_explorer", { path: savePath }),
       });
     } catch (e: any) {
       hide();
-      message.error(e); // 显示具体的错误信息
+      message.error(e);
     }
   };
+
   if (!app) return null;
-
-  // --- 处理 Spawn (冷启动) ---
-  const handleSpawn = async () => {
-    if (!app || !device) return;
-    const hide = message.loading("正在重启应用 (Spawn)...", 0);
-    try {
-      // 1. 先停止
-      await invoke("stop_app", { deviceId: device.id, pkg: app.pkg });
-      // 2. 再启动
-      await invoke("launch_app", { deviceId: device.id, pkg: app.pkg });
-
-      hide();
-      message.success("应用已 Spawn (冷启动)");
-
-      // 这里后续可以衔接你的 Python 脚本或者 frida 命令
-      // 比如: invoke('run_frida_script', { mode: 'spawn' })
-    } catch (e) {
-      hide();
-      message.error("Spawn 失败");
-    }
-  };
-
-  // --- 处理 Attach (热启动) ---
-  const handleAttach = async () => {
-    if (!app || !device) return;
-    const hide = message.loading("正在附加进程 (Attach)...", 0);
-    try {
-      // Attach 不需要重启，直接确认应用在运行即可
-      // 这里只是简单的 UI 反馈，实际逆向时这里会运行 frida -U -n ...
-      await new Promise((r) => setTimeout(r, 500)); // 模拟连接耗时
-
-      hide();
-      message.success("已附加到当前进程 (Attach)");
-
-      // 后续衔接: invoke('run_frida_script', { mode: 'attach' })
-    } catch (e) {
-      hide();
-      message.error("Attach 失败");
-    }
-  };
 
   const tabItems = [
     {
@@ -277,7 +225,7 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
               <Descriptions.Item label="目标 SDK">
                 {detail?.targetSdk || "-"}
               </Descriptions.Item>
-              <Descriptions.Item label="用户 ID (UID)">
+              <Descriptions.Item label="用户 ID">
                 {detail?.uid || "-"}
               </Descriptions.Item>
               <Descriptions.Item label="数据目录">
@@ -296,7 +244,7 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
             </Descriptions>
           </Spin>
 
-          {/* 操作按钮 */}
+          {/* 操作按钮区 */}
           <div
             style={{
               display: "flex",
@@ -307,7 +255,6 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
           >
             <Divider style={{ margin: "0" }}>Frida 调试台</Divider>
 
-            {/* 🔥 核心区域：脚本选择与执行 */}
             <div
               style={{
                 background: "#f5f7fa",
@@ -322,17 +269,14 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
                   placeholder="选择要注入的脚本"
                   value={selectedScriptId}
                   onChange={setSelectedScriptId}
-                  options={scripts.map((s) => ({
-                    label: s.name,
-                    value: s.id,
-                  }))}
+                  options={scripts.map((s) => ({ label: s.name, value: s.id }))}
                 />
                 <Tooltip title="去脚本工坊编辑">
                   <Button
                     icon={<EditOutlined />}
                     onClick={() => {
                       onClose();
-                      onNavigate("script-lab"); // 跳转去编辑
+                      onNavigate("script-lab");
                     }}
                   />
                 </Tooltip>
@@ -348,7 +292,6 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
                 >
                   Spawn (重启注入)
                 </Button>
-
                 <Button
                   type="primary"
                   block
@@ -359,7 +302,6 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
                   Attach (热注入)
                 </Button>
               </div>
-
               <div
                 style={{
                   marginTop: 8,
@@ -379,11 +321,8 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
                 icon={<CodeOutlined />}
                 onClick={() => {
                   onClose();
-                  onNavigate(
-                    "algo-converter",
-                    `// 正在分析应用: ${app.name}\n// 包名: ${app.pkg}\n// APK路径: ${detail?.sourceDir}\n`
-                  );
-                  message.info("已跳转至代码转译工具");
+                  onNavigate("algo-converter", `// 正在分析: ${app.name}\n`);
+                  message.info("已跳转");
                 }}
               >
                 算法分析
@@ -395,13 +334,14 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
               >
                 提取 APK
               </Button>
+              {/* 🔥 修改：点击按钮切换右侧面板状态 */}
               <Button
                 block
                 icon={<FileZipOutlined />}
+                type={rightPanel === "so" ? "primary" : "default"} // 高亮状态
                 onClick={() => {
-                  onClose();
-                  onNavigate("so-analyzer");
-                  message.info("请从 APK 路径提取 SO 文件");
+                  // 如果已经是 SO 界面，则关闭；否则打开 SO 界面
+                  setRightPanel(rightPanel === "so" ? null : "so");
                 }}
               >
                 查看 SO 库
@@ -425,22 +365,12 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
       label: <span>文件</span>,
       icon: <FolderOpenOutlined />,
       children: (
-        <div
-          style={{
-            padding: "16px 0",
-            alignItems: "center",
-            color: "#999",
-          }}
-        >
-          {/* <Empty description="Root 文件管理器 (开发中)" />
-          <div style={{ marginTop: 16 }}>支持查看 /data/data/{app.pkg}</div> */}
-          <div style={{ height: "100%" }}>
-            <FileExplorer
-              deviceId={device?.id || ""}
-              initialPath={`/data/data/${app.pkg}`}
-              mode="compact" // 直达应用数据目录
-            />
-          </div>
+        <div style={{ padding: "16px 0", height: "100%" }}>
+          <FileExplorer
+            deviceId={device?.id || ""}
+            initialPath={`/data/data/${app.pkg}`}
+            mode="compact"
+          />
         </div>
       ),
     },
@@ -449,20 +379,7 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
       label: <span>日志</span>,
       icon: <FileTextOutlined />,
       children: (
-        <div
-          style={{
-            padding: 24,
-            height: "100%",
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            color: "#999",
-          }}
-        >
-          <Empty description="系统 Logcat + Frida Log (开发中)" />
-          <div style={{ marginTop: 16 }}>实时过滤 {app.pkg} 的日志</div>
-        </div>
+        <Empty description="系统 Logcat (开发中)" style={{ marginTop: 50 }} />
       ),
     },
   ];
@@ -472,7 +389,8 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
       title={app.name}
       open={visible}
       onClose={onClose}
-      width={consoleVisible ? 900 : 480}
+      // 🔥 核心修改 2：根据是否有右侧面板动态调整宽度
+      width={rightPanel ? 900 : 480}
       extra={
         <Button
           type="text"
@@ -481,27 +399,27 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
           loading={loading}
         />
       }
-      // 去掉默认 padding，由内部 flex 布局控制
       bodyStyle={{ padding: 0, overflow: "hidden" }}
     >
       <div
         style={{
-          display: "flex", // 让左右两块并排
+          display: "flex",
           height: "100%",
           width: "100%",
           overflow: "hidden",
         }}
       >
+        {/* 左侧固定区域 (450px) */}
         <div
           style={{
-            width: 450, // 固定宽度
-            flexShrink: 0, // 防止被压缩
-            padding: 24, // 内容 padding
-            overflowY: "auto", // 只有这一块滚动
-            borderRight: consoleVisible ? "1px solid #f0f0f0" : "none",
+            width: 450,
+            flexShrink: 0,
+            padding: 24,
+            overflowY: "auto",
+            // 右侧有内容时显示分割线
+            borderRight: rightPanel ? "1px solid #f0f0f0" : "none",
           }}
         >
-          {/* 头部信息 */}
           <div style={{ textAlign: "center" }}>
             <Avatar
               shape="square"
@@ -512,7 +430,6 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
             <h3 style={{ margin: "12px 0 4px" }}>{app.name}</h3>
             <Tag style={{ fontFamily: "monospace" }}>{app.pkg}</Tag>
           </div>
-          {/* 🔥 这里的 Tabs 撑满左侧 */}
           <Tabs
             defaultActiveKey="overview"
             centered
@@ -522,15 +439,31 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
           />
         </div>
 
-        {/* 🔥 核心修改 3：右侧控制台 (条件渲染) */}
-        {consoleVisible && (
+        {/* 🔥 核心修改 3：右侧动态区域 (Flex 1) */}
+        {rightPanel && (
           <div style={{ flex: 1, minWidth: 0, height: "100%" }}>
-            {/* 这里直接渲染 FridaConsole，因为它已经是个普通 div 了 */}
-            <FridaConsole
-              onClose={() => setConsoleVisible(false)} // 点击关闭，隐藏右侧，抽屉变窄
-              appName={app.name}
-              sessionId={app.pkg}
-            />
+            {/* 情况 A: 显示 Frida 控制台 */}
+            {rightPanel === "console" && (
+              <FridaConsole
+                onClose={() => setRightPanel(null)} // 关闭右侧
+                appName={app.name}
+                sessionId={app.pkg}
+              />
+            )}
+
+            {/* 情况 B: 显示 SO 库查看器 */}
+            {rightPanel === "so" && device && (
+              <SoViewer
+                deviceId={device.id}
+                pkg={app.pkg}
+                apkPath={detail?.sourceDir}
+                onClose={() => setRightPanel(null)} // 关闭右侧
+                onAnalyze={(path) => {
+                  // 预留接口
+                  console.log("Analyze SO:", path);
+                }}
+              />
+            )}
           </div>
         )}
       </div>

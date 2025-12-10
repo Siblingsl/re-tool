@@ -23,6 +23,7 @@ import {
 import Editor, { OnMount } from "@monaco-editor/react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { Header } from "antd/es/layout/layout";
 
 const { Sider, Content } = Layout;
 
@@ -203,7 +204,7 @@ const JavaAnalyzer: React.FC = () => {
 
   return (
     <Layout style={{ height: "100%", background: "#fff" }}>
-      <div
+      <Header
         className="content-header"
       >
         <Space>
@@ -225,7 +226,7 @@ const JavaAnalyzer: React.FC = () => {
         <div style={{ color: "#999", fontSize: 12 }}>
           <CoffeeOutlined /> JADX Java 分析模式
         </div>
-      </div>
+      </Header>
 
       <Layout>
         <Sider

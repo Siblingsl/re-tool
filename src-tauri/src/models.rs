@@ -61,3 +61,20 @@ pub struct SearchResult {
     pub content: String,
     pub match_type: String,
 }
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct AiRequest {
+    pub prompt: String,
+    pub task_type: String,
+    pub context_code: Option<String>,
+    pub error_log: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SoFile {
+    pub name: String,
+    pub zip_path: String,  // 在 APK 内部的路径
+    pub disk_path: String, // 推测的磁盘路径
+    pub size: String,
+    pub arch: String,
+}

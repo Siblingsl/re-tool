@@ -26,6 +26,7 @@ import {
   BuildOutlined,
   CoffeeOutlined,
   GatewayOutlined,
+  ApiOutlined,
 } from "@ant-design/icons";
 import {
   Avatar,
@@ -856,6 +857,14 @@ const Sidebar: React.FC<SidebarProps> = ({
         onClick={() => onViewChange("java-analyzer")}
       >
         <CoffeeOutlined /> <span>Java 源码分析 (JADX)</span>
+      </div>
+      <div
+        className={`nav-item ${
+          currentView === "unidbg-runner" ? "active" : ""
+        }`}
+        onClick={() => onViewChange("unidbg-runner")}
+      >
+        <ApiOutlined /> <span>Unidbg</span>
       </div>
       <div
         className={`nav-item ${currentView === "packer-lab" ? "active" : ""}`}
