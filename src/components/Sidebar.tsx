@@ -881,12 +881,6 @@ const Sidebar: React.FC<SidebarProps> = ({
         <CodeOutlined /> <span>伪代码转译</span>
       </div>
       <div
-        className={`nav-item ${currentView === "so-analyzer" ? "active" : ""}`}
-        onClick={() => onViewChange("so-analyzer")}
-      >
-        <FileZipOutlined /> <span>SO 文件分析</span>
-      </div>
-      <div
         className={`nav-item ${currentView === "asm-lab" ? "active" : ""}`}
         onClick={() => onViewChange("asm-lab")}
       >

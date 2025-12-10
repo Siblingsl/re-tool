@@ -172,13 +172,6 @@ const App: React.FC = () => {
       }
     : undefined;
 
-  const SoAnalyzerPlaceholder = () => (
-    <div className="tool-container">
-      {/* 保持原样 */}
-      <div style={{ padding: 20, textAlign: "center" }}>SO 分析模块占位</div>
-    </div>
-  );
-
   return (
     <div className="layout-container">
       <Sidebar
@@ -263,7 +256,6 @@ const App: React.FC = () => {
         {currentView === "algo-converter" && (
           <CodeConverter initialCode={converterContext} />
         )}
-        {currentView === "so-analyzer" && <SoAnalyzerPlaceholder />}
         {currentView === "asm-lab" && (
           <Empty description="ARM 汇编实验室" style={{ marginTop: 100 }} />
         )}

@@ -2,7 +2,6 @@
 export type ViewMode =
   | "device"
   | "algo-converter"
-  | "so-analyzer"
   | "asm-lab"
   | "install"
   | "show"
