@@ -1,15 +1,15 @@
-use std::process::Command;
 use std::thread;
 use std::net::TcpStream;
 use std::io::{Read, Write};
 use std::time::Duration;
-use tauri::{AppHandle, Manager, Emitter};
+use tauri::{Manager, Emitter};
 use crate::state::AdbState;
+use crate::utils::create_command;
 
 #[tauri::command]
 pub async fn start_scrcpy(serial: String, max_size: u32, bit_rate: u32) -> Result<(), String> {
     std::thread::spawn(move || {
-        let _ = Command::new("scrcpy").arg("-s").arg(serial).arg("--max-size").arg(max_size.to_string()).arg("--video-bit-rate").arg(format!("{}M", bit_rate)).spawn();
+        let _ = create_command("scrcpy").arg("-s").arg(serial).arg("--max-size").arg(max_size.to_string()).arg("--video-bit-rate").arg(format!("{}M", bit_rate)).spawn();
     });
     Ok(())
 }

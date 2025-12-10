@@ -1,6 +1,5 @@
-use crate::utils::{cmd_exec, get_android_label};
+use crate::utils::{cmd_exec, get_android_label, create_command};
 use crate::models::{AppItem, AppDetail};
-use std::process::Command;
 use directories::UserDirs;
 
 #[tauri::command]
@@ -121,7 +120,7 @@ pub async fn get_foreground_app(device_id: String) -> Result<String, String> {
 #[tauri::command]
 pub async fn extract_apk(device_id: String, pkg: String) -> Result<String, String> {
     // 1. 获取 APK 路径
-    let path_output = Command::new("adb")
+    let path_output = create_command("adb")
         .args(&["-s", &device_id, "shell", "pm", "path", &pkg])
         .output()
         .map_err(|e| format!("执行 pm path 失败: {}", e))?;
@@ -150,7 +149,7 @@ pub async fn extract_apk(device_id: String, pkg: String) -> Result<String, Strin
     let local_path_str = local_path.to_string_lossy().to_string();
 
     // 3. 执行 adb pull (同时捕获 stderr)
-    let pull_output = Command::new("adb")
+    let pull_output = create_command("adb")
         .args(&["-s", &device_id, "pull", &remote_path, &local_path_str])
         .output()
         .map_err(|e| format!("执行 adb pull 失败: {}", e))?;

@@ -10,13 +10,3 @@ pub struct AdbState {
 pub struct MitmState {
     pub child: Arc<Mutex<Option<CommandChild>>>,
 }
-
-pub struct UnidbgState {
-    pub child: Arc<Mutex<Option<CommandChild>>>,
-    pub server_child: Mutex<Option<CommandChild>>,
-
-}
-
-pub struct UnidbgProcessState {
-    pub child: Mutex<Option<std::process::Child>>,
-}

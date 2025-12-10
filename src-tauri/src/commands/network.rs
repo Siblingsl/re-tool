@@ -1,14 +1,11 @@
-use tauri::{AppHandle, Emitter, State};
+use tauri::{Emitter, State};
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_shell::process::CommandEvent;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::str::FromStr;
 use base64::{Engine as _, engine::general_purpose};
 use crate::state::MitmState;
-use crate::utils::cmd_exec;
-
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
+use crate::utils::{cmd_exec, create_command};
 
 // 启动 mitmdump
 #[tauri::command]
@@ -22,15 +19,13 @@ pub async fn start_mitmproxy(
     // 无论之前是谁启动的 mitmdump，统统干掉
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("taskkill")
+        let _ = create_command("taskkill")
             .args(&["/F", "/IM", "mitmdump-x86_64-pc-windows-msvc.exe"])
-            .creation_flags(0x08000000) // 隐藏窗口运行
             .output();
             
         // 如果你的文件名改短了，也要试着杀一下短名字的
-        let _ = std::process::Command::new("taskkill")
+        let _ = create_command("taskkill")
             .args(&["/F", "/IM", "mitmdump.exe"])
-            .creation_flags(0x08000000)
             .output();
             
         // 给系统一点时间回收端口
@@ -104,18 +99,14 @@ pub async fn stop_mitmproxy(state: State<'_, MitmState>) -> Result<String, Strin
     // 不管 Rust 认为它死没死，我们在系统层面再杀一次，确保端口释放
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt; // 确保引入扩展 trait
-
         // 杀掉长文件名的
-        let _ = std::process::Command::new("taskkill")
+        let _ = create_command("taskkill")
             .args(&["/F", "/IM", "mitmdump-x86_64-pc-windows-msvc.exe"])
-            .creation_flags(0x08000000) // 0x08000000 = CREATE_NO_WINDOW (隐藏黑框)
             .output();
 
         // 杀掉短文件名的 (防止改过名字)
-        let _ = std::process::Command::new("taskkill")
+        let _ = create_command("taskkill")
             .args(&["/F", "/IM", "mitmdump.exe"])
-            .creation_flags(0x08000000)
             .output();
     }
 
@@ -191,7 +182,7 @@ pub async fn install_cert_root(device_id: String) -> Result<String, String> {
         remote_tmp, system_cert_name, system_cert_name
     );
     
-    let res = cmd_exec("adb", &["-s", &device_id, "shell", &cmd])?;
+    let _res = cmd_exec("adb", &["-s", &device_id, "shell", &cmd])?;
     
     // 5. 软重启生效 (不重启证书不加载)
     // run_command("adb", &["-s", &device_id, "shell", "stop && start"])?; 

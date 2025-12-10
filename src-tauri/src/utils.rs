@@ -2,23 +2,26 @@ use std::process::Command;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-// 必须公开 pub
-pub fn cmd_exec(cmd: &str, args: &[&str]) -> Result<String, String> {
-    let mut command = Command::new(cmd);
-    command.args(args);
-    #[cfg(target_os = "windows")]
-    command.creation_flags(0x08000000); 
-    
-    let output = command.output().map_err(|e| e.to_string())?;
-    
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-    if stderr.is_empty() {
-        Ok(stdout)
-    } else {
-        Ok(format!("{}\n[Stderr]: {}", stdout, stderr))
+// A general-purpose command creation function that hides the console window on Windows.
+pub fn create_command(cmd: &str) -> Command {
+    let mut command = Command::new(cmd);
+    #[cfg(target_os = "windows")]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
     }
+    command
+}
+
+pub fn cmd_exec(cmd: &str, args: &[&str]) -> Result<String, String> {
+    let output = create_command(cmd)
+        .args(args)
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 pub fn get_android_label(pkg: &str) -> String {

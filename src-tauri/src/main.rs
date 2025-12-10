@@ -8,7 +8,6 @@ mod commands;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use tauri::Manager;
-use crate::state::{UnidbgState};
 use state::{AdbState, MitmState};
 use commands::*; // 引入所有模块的命令
 
@@ -21,10 +20,6 @@ fn main() {
         })
         .manage(AdbState { 
             sockets: Arc::new(Mutex::new(HashMap::new())) 
-        })
-        .manage(UnidbgState {
-            child: Arc::new(Mutex::new(None)),
-            server_child: Mutex::new(None),
         })
         .setup(|app| {
             let handle = app.handle().clone();
@@ -117,14 +112,6 @@ fn main() {
                         // child.kill() 可能会失败（例如进程早退出了），用 Result 忽略错误
                         let _ = child.kill(); 
                         println!("[Main] Mitmproxy process killed.");
-                    }
-
-                    // 清理 Unidbg
-                    let unidbg_state = app_handle.state::<UnidbgState>();
-                    let mut unidbg_child = unidbg_state.child.lock().unwrap();
-                    if let Some(child) = unidbg_child.take() {
-                        let _ = child.kill();
-                        println!("[Main] Unidbg process killed.");
                     }
                 }
                 _ => {}

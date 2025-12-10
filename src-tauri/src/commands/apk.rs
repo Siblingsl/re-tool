@@ -1,15 +1,12 @@
 use std::path::Path;
 use std::fs::{self, File};
-use std::process::Command;
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
 use std::io::BufReader;
 use zip::ZipArchive;
 use directories::UserDirs;
 use walkdir::WalkDir;
 use rayon::prelude::*;
 use crate::models::{FileNode, SearchResult, SoFile};
-use crate::utils::{cmd_exec, get_packer_name, is_text_file};
+use crate::utils::{cmd_exec, get_packer_name, is_text_file, create_command};
 
 // 递归扫描目录 
 fn read_dir_recursive(path: &Path) -> Vec<FileNode> {
@@ -34,7 +31,7 @@ fn read_dir_recursive(path: &Path) -> Vec<FileNode> {
             let node = FileNode {
                 title: name.clone(),
                 key: path.to_string_lossy().to_string(),
-                #[cfg_attr(feature = "serde", serde(rename = "isLeaf"))] // 如果你用 serde attrs elsewhere, 否则用上面方案
+
                 is_leaf: !is_dir,
                 children: if is_dir { Some(read_dir_recursive(&path)) } else { None },
             };
@@ -65,9 +62,9 @@ pub async fn apk_decode(apk_path: String) -> Result<String, String> {
     let _ = fs::remove_dir_all(&output_dir);
 
     // 执行: apktool d -f <apk> -o <out>
-    let output = Command::new("cmd")
-        .args(&["/C", "apktool", "d", "-f", &apk_path, "-o", &output_dir])
-        .output() // 记得加 output()
+    let output = create_command("apktool")
+        .args(&["d", "-f", &apk_path, "-o", &output_dir])
+        .output()
         .map_err(|e| e.to_string())?;
 
     if output.status.success() {
@@ -105,12 +102,11 @@ pub async fn save_local_file(path: String, content: String) -> Result<(), String
 #[tauri::command]
 pub async fn apk_build_sign_install(project_dir: String, device_id: String) -> Result<String, String> {
     // 1. 回编译 (Build)
-    let dist_apk = format!("{}/dist/signed.apk", project_dir);
+    let _dist_apk = format!("{}/dist/signed.apk", project_dir);
     let unsigned_apk = format!("{}_unsigned.apk", project_dir);
     
-    let build_res = Command::new("cmd")
-        .args(&["/C", "apktool", "b", &project_dir, "-o", &unsigned_apk])
-        .creation_flags(0x08000000) 
+    let build_res = create_command("apktool")
+        .args(&["b", &project_dir, "-o", &unsigned_apk])
         .output()
         .map_err(|e| format!("调用 apktool 失败: {}", e))?;
 
@@ -146,9 +142,8 @@ pub async fn apk_build_sign_install(project_dir: String, device_id: String) -> R
         signer_jar = "resources/uber-apk-signer.jar";
     }
     
-    let sign_res = Command::new("java")
+    let sign_res = create_command("java")
         .args(&["-jar", signer_jar, "-a", &unsigned_apk, "--allowResign"])
-        .creation_flags(0x08000000)
         .output();
         
     let target_apk = if let Ok(res) = sign_res {
@@ -185,11 +180,10 @@ pub async fn jadx_decompile(apk_path: String) -> Result<String, String> {
 
     // 命令: jadx -d <out> <apk>
     // 注意：Windows 下可能需要 cmd /C jadx ...
-    let output = Command::new("cmd")
-        .args(&["/C", "jadx", "-d", &output_dir, &apk_path])
-        .creation_flags(0x08000000)
+    let output = create_command("jadx")
+        .args(&["-d", &output_dir, &apk_path])
         .output()
-        .map_err(|e| format!("调用 jadx 失败 (请确保已安装 jadx 并配置环境变量): {}", e))?;
+        .map_err(|e| format!("调用 jadx 失败: {}", e))?;
 
     if output.status.success() {
         // JADX 的源码通常在 output_dir/sources 目录下

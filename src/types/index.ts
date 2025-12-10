@@ -10,8 +10,7 @@ export type ViewMode =
   | "apk-builder"
   | "java-analyzer"
   | "packer-lab"
-  | "network-sniffer"
-  | "unidbg-runner";
+  | "network-sniffer";
 
 export interface AiRequest {
   prompt: string;

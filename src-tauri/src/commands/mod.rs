@@ -18,7 +18,7 @@ pub async fn run_command(cmd: String, args: Vec<String>) -> Result<String, Strin
 pub async fn open_file_explorer(path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer")
+        crate::utils::create_command("explorer")
             .args(["/select,", &path])
             .spawn()
             .map_err(|e| e.to_string())?;

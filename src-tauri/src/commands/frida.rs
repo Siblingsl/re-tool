@@ -1,13 +1,13 @@
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write, Cursor, Read};
 use std::time::Duration;
 use std::thread;
 use reqwest;
 use xz2::read::XzDecoder;
-use tauri::{AppHandle, Emitter};
+use tauri::Emitter;
 use crate::models::FridaRelease;
-use crate::utils::cmd_exec;
+use crate::utils::{cmd_exec, create_command};
 
 async fn download_frida(version: &str, arch: &str) -> Result<String, String> {
     let filename = format!("frida-server-{}-android-{}.xz", version, arch);
@@ -55,7 +55,7 @@ pub async fn get_frida_versions() -> Result<Vec<String>, String> {
 #[tauri::command]
 pub async fn check_frida_installed(device_id: String) -> Result<bool, String> {
     // test -f 返回 0 表示存在，返回 1 表示不存在
-    let output = Command::new("adb")
+    let output = create_command("adb")
         .args(&["-s", &device_id, "shell", "test -f /data/local/tmp/frida-server"])
         .output()
         .map_err(|e| e.to_string())?;
@@ -93,7 +93,7 @@ pub async fn check_frida_running(device_id: String) -> Result<bool, String> {
     // 方法 1: 使用 pidof (最准，Android 6+ 支持)
     // 如果 frida-server 在运行，它会输出 PID (如 "1234")
     // 如果没运行，输出为空，或者返回错误码
-    let output = Command::new("adb")
+    let output = create_command("adb")
         .args(&["-s", &device_id, "shell", "pidof", "frida-server"])
         .output()
         .map_err(|e| e.to_string())?;
@@ -109,7 +109,7 @@ pub async fn check_frida_running(device_id: String) -> Result<bool, String> {
     // 方法 2: 如果 pidof 失败，回退到 ps 过滤 (增加 -v grep 排除自己)
     // 命令: ps -A | grep frida-server | grep -v grep
     let fallback_cmd = "ps -A | grep frida-server | grep -v grep";
-    let output_fallback = Command::new("adb")
+    let output_fallback = create_command("adb")
         .args(&["-s", &device_id, "shell", fallback_cmd])
         .output()
         .map_err(|e| e.to_string())?;
@@ -141,7 +141,7 @@ pub async fn run_frida_script(app: tauri::AppHandle, device_id: String, package_
 
     // 3. 启动子进程，并劫持 stdout
     // 注意：这里不需要 spawn move，因为我们要拿到 child 的句柄
-    let mut child = Command::new("frida")
+    let mut child = create_command("frida")
         .arg(device_arg)
         .arg("-f") // Spawn 模式
         .arg(&package_name) // 包名

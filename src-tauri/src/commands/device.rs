@@ -2,9 +2,8 @@ use tauri::Emitter;
 use std::collections::HashSet;
 use std::thread;
 use std::time::Duration;
-use crate::utils::cmd_exec;
+use crate::utils::{cmd_exec, create_command};
 use crate::models::DeviceItem;
-use std::process::Command;
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 
 
@@ -115,7 +114,7 @@ pub async fn get_device_abi(device_id: String) -> Result<String, String> {
 #[tauri::command]
 pub async fn check_is_rooted(device_id: String) -> Result<bool, String> {
     // 尝试执行 'su -c id'，如果成功且返回 uid=0，说明有 Root 权限
-    let output = Command::new("adb")
+    let output = create_command("adb")
         .args(&["-s", &device_id, "shell", "su -c id"])
         .output()
         .map_err(|e| e.to_string())?;
@@ -129,7 +128,7 @@ pub async fn check_is_rooted(device_id: String) -> Result<bool, String> {
     }
 
     // 备用检测：检查 su 二进制文件是否存在 (针对某些只装了 su 但没授权 shell 的情况)
-    let check_bin = Command::new("adb")
+    let check_bin = create_command("adb")
         .args(&["-s", &device_id, "shell", "which su"])
         .output()
         .map_err(|e| e.to_string())?;
