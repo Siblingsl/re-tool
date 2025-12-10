@@ -34,9 +34,7 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "resources/*",
-      "templates/*",
-      "templates/**/*"
+      "resources/*"
     ],
     "externalBin": [
       "bin/mitmdump"

@@ -859,14 +859,6 @@ const Sidebar: React.FC<SidebarProps> = ({
         <CoffeeOutlined /> <span>Java 源码分析 (JADX)</span>
       </div>
       <div
-        className={`nav-item ${
-          currentView === "unidbg-runner" ? "active" : ""
-        }`}
-        onClick={() => onViewChange("unidbg-runner")}
-      >
-        <ApiOutlined /> <span>Unidbg</span>
-      </div>
-      <div
         className={`nav-item ${currentView === "packer-lab" ? "active" : ""}`}
         onClick={() => onViewChange("packer-lab")}
       >

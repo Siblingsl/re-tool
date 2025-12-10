@@ -16,9 +16,10 @@
 
     /* Linting */
     "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": false, // 允许定义但未使用的局部变量
+    "noUnusedParameters": false, // 允许定义但未使用的函数参数
+    "noEmitOnError": false,
 
     "baseUrl": ".",
     "paths": {

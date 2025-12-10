@@ -99,19 +99,7 @@ fn main() {
 
             // Common
             commands::run_command,
-            commands::open_file_explorer,
-
-            // unidbg
-            unidbg::create_project,
-            unidbg::check_project_valid,
-            unidbg::read_code,
-            unidbg::save_code,
-            unidbg::import_so_file,
-            unidbg::list_so_files,
-            unidbg::delete_so_file,
-            unidbg::run_server,
-            unidbg::stop_server,
-            unidbg::unidbg_request
+            commands::open_file_explorer
             
         ])
         .build(tauri::generate_context!())

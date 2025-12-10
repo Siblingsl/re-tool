@@ -27,6 +27,7 @@ export const getConnectedDevices = async (): Promise<Device[]> => {
       id: d.id,
       name: d.name,
       os: d.os,
+      type_: d.type_ as "android" | "ios",
       type: d.type_ as "android" | "ios",
       status: d.status as "online" | "offline",
       battery: 100,

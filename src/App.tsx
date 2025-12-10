@@ -18,7 +18,6 @@ import ApkBuilder from "./views/ApkBuilder";
 import JavaAnalyzer from "./views/JavaAnalyzer";
 import PackerLab from "./views/PackerLab";
 import NetworkSniffer from "./views/NetworkSniffer";
-import UnidbgLab from "./views/UnidbgKab";
 
 // 定义脚本接口
 export interface ScriptItem {
@@ -243,8 +242,6 @@ const App: React.FC = () => {
         )}
 
         {currentView === "java-analyzer" && <JavaAnalyzer />}
-
-        {currentView === "unidbg-runner" && <UnidbgLab />}
 
         {currentView === "packer-lab" && (
           <PackerLab currentDevice={currentDevice} />
