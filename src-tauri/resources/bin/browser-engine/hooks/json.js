@@ -5,15 +5,21 @@ module.exports = async (page) => {
     const _parse = JSON.parse;
     const _stringify = JSON.stringify;
 
+    const getStack = () => {
+      try {
+        throw new Error();
+      } catch (e) {
+        return e.stack ? e.stack.split("\n").slice(2).join("\n") : "无堆栈信息";
+      }
+    };
+
     JSON.parse = function (...args) {
       const str = args[0];
       if (typeof str === "string" && str.length > 2) {
-        // 限制长度防止刷屏
         console.log(
-          `[JSON.parse] ${str.substring(0, 100)}${
-            str.length > 100 ? "..." : ""
-          }`
+          `[JSON 解析] ${str.substring(0, 100)}${str.length > 100 ? "..." : ""}`
         );
+        console.log(`[调用堆栈] \n${getStack()}`);
       }
       return _parse.apply(this, args);
     };
@@ -22,10 +28,11 @@ module.exports = async (page) => {
       const result = _stringify.apply(this, args);
       if (result && result.length > 2) {
         console.log(
-          `[JSON.stringify] ${result.substring(0, 100)}${
+          `[JSON 序列化] ${result.substring(0, 100)}${
             result.length > 100 ? "..." : ""
           }`
         );
+        console.log(`[调用堆栈] \n${getStack()}`);
       }
       return result;
     };

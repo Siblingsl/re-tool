@@ -15,6 +15,7 @@ import {
   InputNumber,
   List,
   Modal,
+  Tag,
 } from "antd";
 import {
   BugOutlined,
@@ -30,7 +31,11 @@ import {
   GlobalOutlined,
   PlusOutlined,
   DeleteOutlined,
-  EyeOutlined, // 🔥 新增图标
+  EyeOutlined,
+  RobotOutlined,
+  EditOutlined,
+  FileAddOutlined,
+  UserAddOutlined,
 } from "@ant-design/icons";
 import Editor from "@monaco-editor/react";
 import { invoke } from "@tauri-apps/api/core";
@@ -41,7 +46,6 @@ const { Text } = Typography;
 const { Panel } = Collapse;
 const { TextArea } = Input;
 
-// ... (InterceptRule 接口保持不变) ...
 interface InterceptRule {
   id: string;
   enabled: boolean;
@@ -51,8 +55,15 @@ interface InterceptRule {
   payload: string;
 }
 
+// 🔥🔥🔥 新增：自定义脚本接口 🔥🔥🔥
+interface CustomScript {
+  id: string;
+  name: string;
+  code: string;
+  enabled: boolean;
+}
+
 const WebLab: React.FC = () => {
-  // ... (原有状态保持不变) ...
   const [logs, setLogs] = useState<string>("");
   const [url, setUrl] = useState("https://www.whoer.net");
   const [config, setConfig] = useState({
@@ -76,12 +87,23 @@ const WebLab: React.FC = () => {
     payload: "",
   });
 
+  // 🔥🔥🔥 新增：自定义脚本状态 🔥🔥🔥
+  const [customScripts, setCustomScripts] = useState<CustomScript[]>([]);
+  const [isScriptModalOpen, setIsScriptModalOpen] = useState(false);
+  const [currentScript, setCurrentScript] = useState<CustomScript>({
+    id: "",
+    name: "New Script",
+    code: '// 在此编写要在页面加载前注入的 JS 代码\nconsole.log("Custom script loaded!");',
+    enabled: true,
+  });
+
   const [engineStatus, setEngineStatus] = useState("Stopped");
   const [activeTab, setActiveTab] = useState("code");
   const [code, setCode] = useState(
     `/**
  * ✨ Playwright 自动化脚本编辑器
- * * 👁️ 点击上方 "拾取元素" 可快速生成代码
+ * * 👁️ 点击 "拾取元素" 生成点击代码
+ * * 🤖 点击 "AI 验证码" 自动识别图片验证码
  */
 
 try {
@@ -95,30 +117,52 @@ try {
   );
 
   const isManuallyStopping = useRef(false);
+  const isPickingCaptcha = useRef(false);
+  const [aiLoading, setAiLoading] = useState(false);
+
   const isRunning =
     engineStatus.includes("Launch") ||
     engineStatus.includes("Running") ||
     engineStatus.includes("Launched");
 
-  // 🔥🔥🔥 监听事件 🔥🔥🔥
+  // 初始化：从 LocalStorage 加载脚本
+  useEffect(() => {
+    const savedScripts = localStorage.getItem("weblab_custom_scripts");
+    if (savedScripts) {
+      try {
+        setCustomScripts(JSON.parse(savedScripts));
+      } catch (e) {}
+    }
+  }, []);
+
+  // 监听后端事件
   useEffect(() => {
     const unlisten = listen("weblab-event", (event: any) => {
       const { type, payload } = event.payload;
 
-      // 1. 处理拾取到的选择器 (核心新增)
       if (type === "inspector_picked") {
-        message.success(`已拾取: ${payload}`);
-
-        // 自动插入代码到编辑器
-        const insertCode = `\n// 🎯 自动拾取\nawait page.click('${payload}');`;
-        setCode((prev) => prev + insertCode);
-
-        // 自动切回代码 Tab 方便查看
-        setActiveTab("code");
+        const selector = payload;
+        if (isPickingCaptcha.current) {
+          message.loading("正在截取验证码...", 1);
+          invoke("send_web_command", {
+            action: "screenshot_element",
+            data: { selector: selector },
+          });
+        } else {
+          message.success(`已拾取: ${selector}`);
+          const insertCode = `\n// 🎯 自动拾取\nawait page.click('${selector}');`;
+          setCode((prev) => prev + insertCode);
+          setActiveTab("code");
+        }
         return;
       }
 
-      // ... (原有状态逻辑保持不变) ...
+      if (type === "element_screenshot") {
+        const { selector, image } = payload;
+        handleAiRecognition(selector, image);
+        return;
+      }
+
       if (type === "status") {
         if (
           isManuallyStopping.current &&
@@ -144,6 +188,7 @@ try {
           setEngineStatus("Stopped");
           isManuallyStopping.current = false;
         }
+        setAiLoading(false);
         const time = new Date().toLocaleTimeString();
         setLogs((prev) => prev + `\n[${time}] [ERROR] ${payload}`);
         return;
@@ -169,7 +214,29 @@ try {
     };
   }, []);
 
-  // ... (startEngine, stopEngine 等保持不变) ...
+  const handleAiRecognition = async (selector: string, base64Image: string) => {
+    setAiLoading(true);
+    message.loading("正在请求 Gemini 识别...", 0);
+    try {
+      const result = await invoke<string>("call_gemini_service", {
+        prompt:
+          "Please recognize the text or answer in this captcha image. Return ONLY the result text/numbers, do not include any explanation.",
+        image: base64Image,
+      });
+      message.destroy();
+      message.success(`AI 识别结果: ${result}`);
+      const insertCode = `\n// 🤖 AI 识别验证码\n// 目标: ${selector}\nconst captchaResult = "${result.trim()}";\nconsole.log("验证码识别结果:", captchaResult);\n// await page.fill('input[name="captcha"]', captchaResult);`;
+      setCode((prev) => prev + insertCode);
+      setActiveTab("code");
+    } catch (e: any) {
+      message.destroy();
+      message.error("AI 识别失败: " + e);
+    } finally {
+      setAiLoading(false);
+      isPickingCaptcha.current = false;
+    }
+  };
+
   const startEngine = async () => {
     isManuallyStopping.current = false;
     if (!url || !url.startsWith("http")) {
@@ -188,6 +255,10 @@ try {
             headless: config.headless,
             hooks: config.hooks,
             intercepts: interceptRules.filter((r) => r.enabled),
+            // 🔥🔥🔥 传递自定义脚本 🔥🔥🔥
+            customScripts: customScripts
+              .filter((s) => s.enabled)
+              .map((s) => s.code),
           },
         });
         message.success("启动指令已发送");
@@ -233,17 +304,7 @@ try {
     setActiveTab("console");
   };
 
-  // 🔥🔥🔥 新增：开启拾取模式 🔥🔥🔥
-  const startInspector = async () => {
-    if (!isRunning) {
-      message.warning("请先启动浏览器");
-      return;
-    }
-    await invoke("send_web_command", { action: "toggle_inspector", data: {} });
-    message.loading("已进入拾取模式，请点击网页元素...", 2);
-  };
-
-  // ... (规则管理函数 addRule, saveRule, deleteRule 保持不变) ...
+  // 拦截规则 CRUD
   const addRule = () => {
     setCurrentRule({
       id: Date.now().toString(),
@@ -271,9 +332,60 @@ try {
     setInterceptRules((prev) => prev.filter((r) => r.id !== id));
   };
 
+  // 🔥🔥🔥 自定义脚本 CRUD 🔥🔥🔥
+  const addScript = () => {
+    setCurrentScript({
+      id: Date.now().toString(),
+      name: `Script ${customScripts.length + 1}`,
+      code: '// 在此输入代码，将在页面加载前(document-start)执行\n// 例如: window.myVar = 123;\nconsole.log("My Custom Script Injected!");',
+      enabled: true,
+    });
+    setIsScriptModalOpen(true);
+  };
+  const saveScript = () => {
+    const newScripts = [...customScripts];
+    const idx = newScripts.findIndex((s) => s.id === currentScript.id);
+    if (idx > -1) {
+      newScripts[idx] = currentScript;
+    } else {
+      newScripts.push(currentScript);
+    }
+    setCustomScripts(newScripts);
+    localStorage.setItem("weblab_custom_scripts", JSON.stringify(newScripts));
+    setIsScriptModalOpen(false);
+  };
+  const deleteScript = (id: string) => {
+    const newScripts = customScripts.filter((s) => s.id !== id);
+    setCustomScripts(newScripts);
+    localStorage.setItem("weblab_custom_scripts", JSON.stringify(newScripts));
+  };
+  const editScript = (script: CustomScript) => {
+    setCurrentScript(script);
+    setIsScriptModalOpen(true);
+  };
+
+  const startInspector = async () => {
+    if (!isRunning) {
+      message.warning("请先启动浏览器");
+      return;
+    }
+    isPickingCaptcha.current = false;
+    await invoke("send_web_command", { action: "toggle_inspector", data: {} });
+    message.loading("已进入拾取模式，请点击元素...", 1);
+  };
+
+  const startCaptchaInspector = async () => {
+    if (!isRunning) {
+      message.warning("请先启动浏览器");
+      return;
+    }
+    isPickingCaptcha.current = true;
+    await invoke("send_web_command", { action: "toggle_inspector", data: {} });
+    message.loading("请点击【验证码图片】进行识别...", 2);
+  };
+
   const ConfigPanel = () => (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      {/* 状态栏 */}
       <div
         style={{
           padding: "12px",
@@ -303,7 +415,7 @@ try {
         />
       </div>
 
-      <Collapse defaultActiveKey={["rpc", "env"]} ghost size="small">
+      <Collapse defaultActiveKey={["hooks"]} ghost size="small">
         <Panel
           header={
             <span>
@@ -392,6 +504,92 @@ try {
         <Panel
           header={
             <span>
+              <BugOutlined /> 注入 Hook
+            </span>
+          }
+          key="hooks"
+        >
+          <Checkbox.Group
+            style={{ display: "flex", flexDirection: "column", gap: 8 }}
+            options={[
+              { label: "RPC 注入 (必需)", value: "rpc_inject", disabled: true },
+              { label: "JSON.parse 监控", value: "json_hook" },
+              { label: "XHR/Fetch 监控", value: "network_hook" },
+              { label: "Cookie 变化监控", value: "cookie_hook" },
+              { label: "Debugger 绕过", value: "anti_debug" },
+            ]}
+            value={config.hooks}
+            onChange={(v) => setConfig({ ...config, hooks: v as string[] })}
+          />
+        </Panel>
+
+        {/* 🔥🔥🔥 新增：自定义脚本工坊 🔥🔥🔥 */}
+        <Panel
+          header={
+            <span>
+              <UserAddOutlined /> 我的脚本工坊
+            </span>
+          }
+          key="scripts"
+        >
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <Button
+              type="dashed"
+              icon={<FileAddOutlined />}
+              block
+              onClick={addScript}
+            >
+              新建脚本
+            </Button>
+            <List
+              size="small"
+              dataSource={customScripts}
+              renderItem={(item) => (
+                <List.Item
+                  actions={[
+                    <EditOutlined
+                      onClick={() => editScript(item)}
+                      style={{ color: "#1890ff" }}
+                    />,
+                    <DeleteOutlined
+                      onClick={() => deleteScript(item.id)}
+                      style={{ color: "#ff4d4f" }}
+                    />,
+                    <Switch
+                      size="small"
+                      checked={item.enabled}
+                      onChange={(v) => {
+                        const newScripts = customScripts.map((s) =>
+                          s.id === item.id ? { ...s, enabled: v } : s
+                        );
+                        setCustomScripts(newScripts);
+                        localStorage.setItem(
+                          "weblab_custom_scripts",
+                          JSON.stringify(newScripts)
+                        );
+                      }}
+                    />,
+                  ]}
+                >
+                  <div style={{ width: "100%", overflow: "hidden" }}>
+                    <div style={{ fontWeight: 500, fontSize: 13 }}>
+                      {item.name}
+                    </div>
+                    <div style={{ fontSize: 10, color: "#999" }}>
+                      {item.code.length > 30
+                        ? item.code.substring(0, 30) + "..."
+                        : item.code}
+                    </div>
+                  </div>
+                </List.Item>
+              )}
+            />
+          </div>
+        </Panel>
+
+        <Panel
+          header={
+            <span>
               <GlobalOutlined /> 请求拦截 & 替换
             </span>
           }
@@ -440,28 +638,6 @@ try {
               )}
             />
           </div>
-        </Panel>
-
-        <Panel
-          header={
-            <span>
-              <BugOutlined /> 注入 Hook
-            </span>
-          }
-          key="hooks"
-        >
-          <Checkbox.Group
-            style={{ display: "flex", flexDirection: "column", gap: 8 }}
-            options={[
-              { label: "RPC 注入 (必需)", value: "rpc_inject", disabled: true },
-              { label: "JSON.parse 监控", value: "json_hook" },
-              { label: "XHR/Fetch 监控", value: "network_hook" },
-              { label: "Cookie 变化监控", value: "cookie_hook" },
-              { label: "Debugger 绕过", value: "anti_debug" },
-            ]}
-            value={config.hooks}
-            onChange={(v) => setConfig({ ...config, hooks: v as string[] })}
-          />
         </Panel>
       </Collapse>
 
@@ -539,18 +715,24 @@ try {
               超级控制台
             </Button>
           </Space>
-
           <Space>
-            {/* 🔥🔥🔥 新增：拾取按钮 🔥🔥🔥 */}
             <Button
               icon={<EyeOutlined />}
-              style={{ color: "#1890ff", borderColor: "#1890ff" }}
-              disabled={!isRunning}
               onClick={startInspector}
+              disabled={!isRunning || aiLoading}
             >
-              拾取元素
+              拾取
             </Button>
-
+            <Button
+              type="dashed"
+              icon={<RobotOutlined />}
+              style={{ color: "#722ed1", borderColor: "#722ed1" }}
+              onClick={startCaptchaInspector}
+              loading={aiLoading}
+              disabled={!isRunning}
+            >
+              AI 验证码
+            </Button>
             {activeTab === "code" && (
               <Button
                 type="primary"
@@ -668,6 +850,49 @@ try {
               />
             </div>
           )}
+        </div>
+      </Modal>
+
+      {/* 🔥🔥🔥 新增：脚本编辑弹窗 🔥🔥🔥 */}
+      <Modal
+        title="编辑自定义脚本"
+        open={isScriptModalOpen}
+        onOk={saveScript}
+        onCancel={() => setIsScriptModalOpen(false)}
+        width={800}
+        styles={{ body: { height: "500px" } }}
+      >
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            height: "100%",
+            gap: 10,
+          }}
+        >
+          <Input
+            addonBefore="脚本名称"
+            value={currentScript.name}
+            onChange={(e) =>
+              setCurrentScript({ ...currentScript, name: e.target.value })
+            }
+          />
+          <div style={{ flex: 1, border: "1px solid #d9d9d9" }}>
+            <Editor
+              height="100%"
+              defaultLanguage="javascript"
+              value={currentScript.code}
+              onChange={(v) =>
+                setCurrentScript({ ...currentScript, code: v || "" })
+              }
+              theme="vs-light"
+              options={{ minimap: { enabled: false }, fontSize: 14 }}
+            />
+          </div>
+          <div style={{ fontSize: 12, color: "#999" }}>
+            * 此代码将在浏览器环境(Page Context)中执行，可以访问 window,
+            document 等对象。
+          </div>
         </div>
       </Modal>
     </Layout>

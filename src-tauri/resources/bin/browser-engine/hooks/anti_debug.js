@@ -6,7 +6,7 @@ module.exports = async (page) => {
     const _constructor = Function.prototype.constructor;
     Function.prototype.constructor = function (string) {
       if (typeof string === "string" && string.includes("debugger")) {
-        console.log('[Anti-Debug] 拦截到 Function("debugger")');
+        console.log('[反调试] 拦截到 Function("debugger")');
         return function () {};
       }
       return _constructor.apply(this, arguments);
@@ -16,7 +16,7 @@ module.exports = async (page) => {
     const _eval = window.eval;
     window.eval = function (string) {
       if (typeof string === "string" && string.includes("debugger")) {
-        console.log('[Anti-Debug] 拦截到 eval("debugger")');
+        console.log('[反调试] 拦截到 eval("debugger")');
         return _eval(string.replace(/debugger/g, ""));
       }
       return _eval(string);
@@ -26,7 +26,7 @@ module.exports = async (page) => {
     const _setInterval = window.setInterval;
     window.setInterval = function (func, delay) {
       if (func.toString().includes("debugger")) {
-        console.log("[Anti-Debug] 拦截到定时器 debugger");
+        console.log("[反调试] 拦截到定时器 debugger");
         return null;
       }
       return _setInterval(func, delay);

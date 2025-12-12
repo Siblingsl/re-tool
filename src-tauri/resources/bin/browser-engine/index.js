@@ -58,8 +58,6 @@ const handlers = {
     const isHeadless = config.headless !== false;
     const browserType = config.browserType || "firefox";
     const activeHooks = config.hooks || [];
-
-    // 🔥🔥🔥 获取拦截规则 🔥🔥🔥
     const interceptRules = config.intercepts || [];
 
     if (!activeHooks.includes("rpc_inject")) {
@@ -108,7 +106,6 @@ const handlers = {
           browserType === "chromium"
             ? "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             : undefined,
-        // 🔥 必须开启这个才能让 HTTPS 拦截生效 (如果遇到证书错误)
         ignoreHTTPSErrors: true,
       });
 
@@ -129,49 +126,33 @@ const handlers = {
       page = await context.newPage();
       updatePage(page);
 
-      // ============================================
-      // 🔥🔥🔥 注入拦截规则 (Interception) 🔥🔥🔥
-      // ============================================
+      // 注入拦截规则
       for (const rule of interceptRules) {
         if (!rule.enabled) continue;
-
-        // 调用 Playwright 的 route API
         await page.route(rule.urlPattern, async (route) => {
           const request = route.request();
-          const resourceType = request.resourceType(); // script, xhr, fetch, image...
-
-          // 简单的资源类型过滤
+          const resourceType = request.resourceType();
           if (
             rule.resourceType !== "All" &&
             resourceType.toLowerCase() !== rule.resourceType.toLowerCase()
           ) {
             return route.continue();
           }
-
           sendEvent(
             "console",
             `[Intercept] Matched: ${request.url()} (${rule.action})`
           );
-
-          if (rule.action === "Abort") {
-            return route.abort();
-          }
-
+          if (rule.action === "Abort") return route.abort();
           if (rule.action === "MockBody") {
-            // 对于 MockBody，我们需要先获取原始响应的 header (保持 content-type)，或者直接构造一个新的
-            // 这里简化处理：如果是脚本，content-type 设为 javascript，否则 json
             let contentType = "application/json";
             if (rule.resourceType === "Script")
               contentType = "application/javascript";
-
             return route.fulfill({
               status: 200,
               contentType: contentType,
-              body: rule.payload, // 这就是我们在前端输入的 JS 代码或 JSON
+              body: rule.payload,
             });
           }
-
-          // 默认放行
           return route.continue();
         });
       }
@@ -185,6 +166,19 @@ const handlers = {
       });
 
       await injectHooks(page, activeHooks);
+
+      // ============================================
+      // 🔥🔥🔥 注入用户自定义脚本 (Script Manager) 🔥🔥🔥
+      // ============================================
+      const customScripts = config.customScripts || [];
+      for (const scriptCode of customScripts) {
+        try {
+          // 使用 content 属性注入纯字符串代码
+          await page.addInitScript({ content: scriptCode });
+        } catch (e) {
+          sendEvent("error", `自定义脚本注入失败: ${e.message}`);
+        }
+      }
 
       await page.goto(config.url, { timeout: 30000 });
 
@@ -207,41 +201,58 @@ const handlers = {
     }
   },
 
+  async toggle_inspector(data) {
+    if (!page || !isBrowserActive) {
+      sendEvent("error", "请先启动浏览器");
+      return;
+    }
+    try {
+      try {
+        await page.exposeFunction("__weblab_onPick", (selector) => {
+          sendEvent("inspector_picked", selector);
+        });
+      } catch (e) {}
+      await page.evaluate(inspectorScript);
+      sendEvent("console", "[Inspector] 拾取模式已激活，请点击网页元素");
+    } catch (e) {
+      sendEvent("error", `Inspector Error: ${e.message}`);
+    }
+  },
+
+  // 🔥🔥🔥 新增：元素截图 (用于 AI 识别) 🔥🔥🔥
+  async screenshot_element(data) {
+    if (!page || !isBrowserActive) {
+      sendEvent("error", "Browser not active");
+      return;
+    }
+    try {
+      const buffer = await page
+        .locator(data.selector)
+        .screenshot({ type: "png" });
+      const base64 = buffer.toString("base64");
+      sendEvent("element_screenshot", {
+        selector: data.selector,
+        image: base64,
+      });
+    } catch (e) {
+      sendEvent("error", `Screenshot Failed: ${e.message}`);
+    }
+  },
+
   async eval(code) {
     if (!page || !isBrowserActive) {
       sendEvent("error", "Page not ready");
       return;
     }
     try {
-      const result = await page.evaluate(code);
-      sendEvent("eval_result", result);
+      const result = await eval(`(async () => { ${code} })()`);
+      let output;
+      if (result === undefined) output = "undefined";
+      else if (typeof result === "object") output = JSON.stringify(result);
+      else output = String(result);
+      sendEvent("eval_result", output);
     } catch (e) {
       sendEvent("error", e.message);
-    }
-  },
-
-  async toggle_inspector(data) {
-    if (!page || !isBrowserActive) {
-      sendEvent("error", "请先启动浏览器");
-      return;
-    }
-
-    try {
-      // 1. 暴露回调函数给浏览器 (如果已暴露过会报错，所以要 try-catch)
-      try {
-        await page.exposeFunction("__weblab_onPick", (selector) => {
-          sendEvent("inspector_picked", selector); // 发回给前端
-        });
-      } catch (e) {
-        // Ignore if already bound
-      }
-
-      // 2. 注入 JS 脚本开启高亮
-      await page.evaluate(inspectorScript);
-
-      sendEvent("console", "[Inspector] 拾取模式已激活，请点击网页元素");
-    } catch (e) {
-      sendEvent("error", `Inspector Error: ${e.message}`);
     }
   },
 
