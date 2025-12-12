@@ -18,6 +18,7 @@ import ApkBuilder from "./views/ApkBuilder";
 import JavaAnalyzer from "./views/JavaAnalyzer";
 import PackerLab from "./views/PackerLab";
 import NetworkSniffer from "./views/NetworkSniffer";
+import WebLab from "./views/WebLab";
 
 // 定义脚本接口
 export interface ScriptItem {
@@ -253,6 +254,7 @@ const App: React.FC = () => {
         {currentView === "algo-converter" && (
           <CodeConverter initialCode={converterContext} />
         )}
+        {currentView === "web-lab" && <WebLab />}
         {currentView === "asm-lab" && (
           <Empty description="ARM 汇编实验室" style={{ marginTop: 100 }} />
         )}

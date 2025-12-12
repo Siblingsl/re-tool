@@ -27,6 +27,7 @@ import {
   CoffeeOutlined,
   GatewayOutlined,
   ApiOutlined,
+  CompassOutlined,
 } from "@ant-design/icons";
 import {
   Avatar,
@@ -871,6 +872,12 @@ const Sidebar: React.FC<SidebarProps> = ({
         onClick={() => onViewChange("algo-converter")}
       >
         <CodeOutlined /> <span>伪代码转译</span>
+      </div>
+      <div
+        className={`nav-item ${currentView === "web-lab" ? "active" : ""}`}
+        onClick={() => onViewChange("web-lab")}
+      >
+        <CompassOutlined /> <span>Web 逆向实验室</span>
       </div>
       <div
         className={`nav-item ${currentView === "asm-lab" ? "active" : ""}`}

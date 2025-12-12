@@ -6,6 +6,7 @@ pub mod frida;
 pub mod apk;
 pub mod network;
 pub mod ai;
+pub mod weblab;
 
 // 将通用命令放在这里或者单独文件，这里为了简单放在 mod.rs
 #[tauri::command]

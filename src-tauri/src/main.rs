@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use tauri::Manager;
 use state::{AdbState, MitmState};
-use commands::*; // 引入所有模块的命令
+use commands::*;
+
+use crate::state::WebLabState; // 引入所有模块的命令
 
 fn main() {
     tauri::Builder::default()
@@ -20,6 +22,10 @@ fn main() {
         })
         .manage(AdbState { 
             sockets: Arc::new(Mutex::new(HashMap::new())) 
+        })
+        .manage(WebLabState {
+            child: Arc::new(Mutex::new(None)),
+            tx: Arc::new(Mutex::new(None)),
         })
         .setup(|app| {
             let handle = app.handle().clone();
@@ -94,7 +100,11 @@ fn main() {
 
             // Common
             commands::run_command,
-            commands::open_file_explorer
+            commands::open_file_explorer,
+
+            weblab::start_web_engine,
+            weblab::stop_web_engine,
+            weblab::send_web_command
             
         ])
         .build(tauri::generate_context!())
