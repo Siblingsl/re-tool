@@ -8,12 +8,15 @@ import {
   Checkbox,
   Typography,
   message,
+  Tabs,
   Space,
   Select,
   Collapse,
   Badge,
   Tooltip,
   InputNumber,
+  List,
+  Modal,
 } from "antd";
 import {
   BugOutlined,
@@ -26,6 +29,10 @@ import {
   SettingOutlined,
   ApiOutlined,
   ThunderboltOutlined,
+  GlobalOutlined,
+  PlusOutlined,
+  DeleteOutlined,
+  EditOutlined,
 } from "@ant-design/icons";
 import Editor from "@monaco-editor/react";
 import { invoke } from "@tauri-apps/api/core";
@@ -34,52 +41,83 @@ import { listen } from "@tauri-apps/api/event";
 const { Content, Sider } = Layout;
 const { Text } = Typography;
 const { Panel } = Collapse;
+const { TextArea } = Input;
+
+// 定义拦截规则接口
+interface InterceptRule {
+  id: string;
+  enabled: boolean;
+  urlPattern: string; // 譬如 "**/*.js" 或 "https://api.example.com/v1/user"
+  resourceType: string; // "Script", "XHR", "All"
+  action: "Abort" | "MockBody" | "MockFile";
+  payload: string; // 响应体内容 或 文件路径
+}
 
 const WebLab: React.FC = () => {
+  // ... (保留原有的 logs, url, config, engineStatus 等状态) ...
   const [logs, setLogs] = useState<string>("");
   const [url, setUrl] = useState("https://www.whoer.net");
   const [config, setConfig] = useState({
     browserType: "firefox",
     stealth: true,
     headless: false,
-    hooks: ["json_hook", "rpc_inject"], // 默认开启 RPC 注入
+    hooks: ["rpc_inject"],
   });
 
   // RPC 状态
   const [rpcPort, setRpcPort] = useState(9999);
   const [rpcRunning, setRpcRunning] = useState(false);
 
+  // 拦截规则状态
+  const [interceptRules, setInterceptRules] = useState<InterceptRule[]>([]);
+  const [isRuleModalOpen, setIsRuleModalOpen] = useState(false);
+  const [currentRule, setCurrentRule] = useState<InterceptRule>({
+    id: "",
+    enabled: true,
+    urlPattern: "",
+    resourceType: "Script",
+    action: "MockBody",
+    payload: "",
+  });
+
   const [engineStatus, setEngineStatus] = useState("Stopped");
   const [activeTab, setActiveTab] = useState("code");
   const [code, setCode] = useState(
     `/**
  * ✨ Playwright 自动化脚本编辑器
- * * 🚀 支持 Node.js 环境下 Playwright API
- * * 💡 提示：使用 await page.evaluate(() => {...}) 在浏览器内执行 JS
+ * * ✅ 全局预置对象 (无需 import，直接使用):
+ * - page:    当前页面对象 (Playwright Page)
+ * - context: 浏览器上下文 (BrowserContext)
+ * - browser: 浏览器实例 (Browser)
+ * * 🚀 支持 Top-level await，请在下方直接编写业务逻辑
  */
 
 try {
-  console.log(">>> 开始执行...");
+  console.log(">>> 开始执行脚本...");
+
+  // 1. 获取当前页面信息
   const title = await page.title();
-  console.log(\`页面标题: \${title}\`);
+  const url = page.url();
+  console.log(\`📄 标题: \${title}\`);
+  console.log(\`🔗 地址: \${url}\`);
+
+  console.log("<<< 脚本执行完毕");
   return "Success";
 } catch (err) {
-  console.error(err.message);
+  console.error("❌ 执行出错:", err.message);
 }`
   );
 
   const isManuallyStopping = useRef(false);
-
   const isRunning =
     engineStatus.includes("Launch") ||
     engineStatus.includes("Running") ||
     engineStatus.includes("Launched");
 
+  // ... (保留 useEffect, listen 逻辑不变) ...
   useEffect(() => {
     const unlisten = listen("weblab-event", (event: any) => {
       const { type, payload } = event.payload;
-
-      // 状态处理
       if (type === "status") {
         if (
           isManuallyStopping.current &&
@@ -87,21 +125,19 @@ try {
           payload !== "Browser Closed"
         )
           return;
-
         if (
           payload === "Browser Closed" ||
           payload === "Browser Force Closed" ||
           payload === "Stopped"
         ) {
           setEngineStatus("Stopped");
-          setRpcRunning(false); // 浏览器关了，RPC 也就断了
+          setRpcRunning(false);
           isManuallyStopping.current = false;
           if (payload === "Browser Closed") message.info("浏览器已关闭");
         } else {
           setEngineStatus(payload);
         }
       }
-
       if (type === "error") {
         if (payload.includes("Launch Failed")) {
           setEngineStatus("Stopped");
@@ -111,8 +147,6 @@ try {
         setLogs((prev) => prev + `\n[${time}] [ERROR] ${payload}`);
         return;
       }
-
-      // RPC 日志特殊处理
       if (type === "rpc_log") {
         const time = new Date().toLocaleTimeString();
         if (payload.includes("已启动")) setRpcRunning(true);
@@ -120,7 +154,6 @@ try {
         setLogs((prev) => prev + `\n[${time}] [RPC] ${payload}`);
         return;
       }
-
       const time = new Date().toLocaleTimeString();
       let logLine = `[${time}] [${type}] `;
       if (typeof payload === "object") {
@@ -130,19 +163,18 @@ try {
       }
       setLogs((prev) => prev + "\n" + logLine);
     });
-
     return () => {
       unlisten.then((f) => f());
     };
   }, []);
 
+  // ... (保留 startEngine, stopEngine, runEval, toggleRpc 等函数不变) ...
   const startEngine = async () => {
     isManuallyStopping.current = false;
     if (!url || !url.startsWith("http")) {
       message.warning("请输入有效的 HTTP/HTTPS URL");
       return;
     }
-
     try {
       setEngineStatus("Launching...");
       await invoke("start_web_engine");
@@ -154,6 +186,8 @@ try {
             browserType: config.browserType,
             headless: config.headless,
             hooks: config.hooks,
+            // 🔥🔥🔥 传递拦截规则给后端 🔥🔥🔥
+            intercepts: interceptRules.filter((r) => r.enabled),
           },
         });
         message.success("启动指令已发送");
@@ -178,7 +212,6 @@ try {
     }
   };
 
-  // 控制 RPC 服务
   const toggleRpc = async () => {
     if (!isRunning) {
       message.warning("请先启动浏览器");
@@ -200,7 +233,36 @@ try {
     setActiveTab("console");
   };
 
-  // 左侧配置面板 (使用 Collapse 优化结构)
+  // 规则管理函数
+  const addRule = () => {
+    setCurrentRule({
+      id: Date.now().toString(),
+      enabled: true,
+      urlPattern: "**/*.js",
+      resourceType: "Script",
+      action: "MockBody",
+      payload: '// Hooked Code\nconsole.log("Script Intercepted!");',
+    });
+    setIsRuleModalOpen(true);
+  };
+
+  const saveRule = () => {
+    setInterceptRules((prev) => {
+      const idx = prev.findIndex((r) => r.id === currentRule.id);
+      if (idx > -1) {
+        const next = [...prev];
+        next[idx] = currentRule;
+        return next;
+      }
+      return [...prev, currentRule];
+    });
+    setIsRuleModalOpen(false);
+  };
+
+  const deleteRule = (id: string) => {
+    setInterceptRules((prev) => prev.filter((r) => r.id !== id));
+  };
+
   const ConfigPanel = () => (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       {/* 状态栏 */}
@@ -234,7 +296,7 @@ try {
       </div>
 
       <Collapse defaultActiveKey={["rpc", "env"]} ghost size="small">
-        {/* 1. RPC 桥接 (核心功能) */}
+        {/* 1. RPC 桥接 */}
         <Panel
           header={
             <span>
@@ -321,7 +383,61 @@ try {
           </div>
         </Panel>
 
-        {/* 3. Hook 注入 */}
+        {/* 3. 请求拦截 (新增) */}
+        <Panel
+          header={
+            <span>
+              <GlobalOutlined /> 请求拦截 & 替换
+            </span>
+          }
+          key="intercept"
+        >
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <Button
+              type="dashed"
+              icon={<PlusOutlined />}
+              block
+              onClick={addRule}
+            >
+              添加拦截规则
+            </Button>
+            <List
+              size="small"
+              dataSource={interceptRules}
+              renderItem={(item) => (
+                <List.Item
+                  actions={[
+                    <DeleteOutlined
+                      onClick={() => deleteRule(item.id)}
+                      style={{ color: "#ff4d4f" }}
+                    />,
+                    <Switch
+                      size="small"
+                      checked={item.enabled}
+                      onChange={(v) => {
+                        const newRules = interceptRules.map((r) =>
+                          r.id === item.id ? { ...r, enabled: v } : r
+                        );
+                        setInterceptRules(newRules);
+                      }}
+                    />,
+                  ]}
+                >
+                  <div style={{ width: "100%", overflow: "hidden" }}>
+                    <div style={{ fontWeight: 500, fontSize: 13 }}>
+                      {item.urlPattern}
+                    </div>
+                    <div style={{ fontSize: 12, color: "#999" }}>
+                      {item.action} • {item.resourceType}
+                    </div>
+                  </div>
+                </List.Item>
+              )}
+            />
+          </div>
+        </Panel>
+
+        {/* 4. Hook 注入 */}
         <Panel
           header={
             <span>
@@ -474,6 +590,72 @@ try {
           </div>
         </div>
       </Content>
+
+      {/* 规则编辑弹窗 */}
+      <Modal
+        title="编辑拦截规则"
+        open={isRuleModalOpen}
+        onOk={saveRule}
+        onCancel={() => setIsRuleModalOpen(false)}
+        width={600}
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div>
+            <Text>URL 匹配模式 (支持通配符 *)</Text>
+            <Input
+              value={currentRule.urlPattern}
+              onChange={(e) =>
+                setCurrentRule({ ...currentRule, urlPattern: e.target.value })
+              }
+              placeholder="例如: **/api/v1/login 或 **/*.js"
+            />
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <div style={{ flex: 1 }}>
+              <Text>资源类型</Text>
+              <Select
+                value={currentRule.resourceType}
+                onChange={(v) =>
+                  setCurrentRule({ ...currentRule, resourceType: v })
+                }
+                options={[
+                  { value: "Script", label: "JS 脚本" },
+                  { value: "XHR", label: "XHR/Fetch" },
+                  { value: "Image", label: "图片" },
+                  { value: "All", label: "所有" },
+                ]}
+                style={{ width: "100%" }}
+              />
+            </div>
+            <div style={{ flex: 1 }}>
+              <Text>动作</Text>
+              <Select
+                value={currentRule.action}
+                onChange={(v) => setCurrentRule({ ...currentRule, action: v })}
+                options={[
+                  { value: "MockBody", label: "修改响应体" },
+                  { value: "Abort", label: "阻断请求" },
+                ]}
+                style={{ width: "100%" }}
+              />
+            </div>
+          </div>
+          {currentRule.action === "MockBody" && (
+            <div>
+              <Text>响应体内容 (JS代码或JSON)</Text>
+              <TextArea
+                rows={6}
+                value={currentRule.payload}
+                onChange={(e) =>
+                  setCurrentRule({ ...currentRule, payload: e.target.value })
+                }
+                placeholder="// 在这里输入你要替换的 JS 代码..."
+                style={{ fontFamily: "monospace" }}
+              />
+            </div>
+          )}
+        </div>
+      </Modal>
     </Layout>
   );
 };

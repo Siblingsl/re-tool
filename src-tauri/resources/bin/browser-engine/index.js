@@ -2,9 +2,8 @@ const { chromium, firefox, webkit } = require("playwright-extra");
 const stealthPlugin = require("puppeteer-extra-plugin-stealth");
 const readline = require("readline");
 const { injectHooks } = require("./hooks");
-const { startRpcServer, stopRpcServer, updatePage } = require("./rpc_server"); // 🔥 引入 RPC
+const { startRpcServer, stopRpcServer, updatePage } = require("./rpc_server");
 
-// 仅 Chromium 支持完美隐身
 chromium.use(stealthPlugin());
 
 let browser = null;
@@ -24,7 +23,6 @@ const sendEvent = (type, payload) => {
   } catch (e) {}
 };
 
-// 发送 RPC 专用日志
 const sendRpcLog = (msg) => {
   sendEvent("rpc_log", msg);
 };
@@ -33,11 +31,7 @@ const handleExit = (source) => {
   if (isBrowserActive) {
     isBrowserActive = false;
     sendEvent("status", "Browser Closed");
-
-    // 浏览器关闭时，是否要关闭 RPC 服务？
-    // 策略：保持 RPC 服务开启，但置空 page，等待下次启动自动重连
     updatePage(null);
-
     browser = null;
     context = null;
     page = null;
@@ -62,9 +56,11 @@ const handlers = {
 
     const isHeadless = config.headless !== false;
     const browserType = config.browserType || "firefox";
-
-    // 🔥 强制注入 RPC Hook (默认开启)
     const activeHooks = config.hooks || [];
+
+    // 🔥🔥🔥 获取拦截规则 🔥🔥🔥
+    const interceptRules = config.intercepts || [];
+
     if (!activeHooks.includes("rpc_inject")) {
       activeHooks.push("rpc_inject");
     }
@@ -111,6 +107,8 @@ const handlers = {
           browserType === "chromium"
             ? "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             : undefined,
+        // 🔥 必须开启这个才能让 HTTPS 拦截生效 (如果遇到证书错误)
+        ignoreHTTPSErrors: true,
       });
 
       context.on("close", () => handleExit("context_closed"));
@@ -128,9 +126,54 @@ const handlers = {
       });
 
       page = await context.newPage();
-
-      // 🔥 更新 RPC 服务的页面引用
       updatePage(page);
+
+      // ============================================
+      // 🔥🔥🔥 注入拦截规则 (Interception) 🔥🔥🔥
+      // ============================================
+      for (const rule of interceptRules) {
+        if (!rule.enabled) continue;
+
+        // 调用 Playwright 的 route API
+        await page.route(rule.urlPattern, async (route) => {
+          const request = route.request();
+          const resourceType = request.resourceType(); // script, xhr, fetch, image...
+
+          // 简单的资源类型过滤
+          if (
+            rule.resourceType !== "All" &&
+            resourceType.toLowerCase() !== rule.resourceType.toLowerCase()
+          ) {
+            return route.continue();
+          }
+
+          sendEvent(
+            "console",
+            `[Intercept] Matched: ${request.url()} (${rule.action})`
+          );
+
+          if (rule.action === "Abort") {
+            return route.abort();
+          }
+
+          if (rule.action === "MockBody") {
+            // 对于 MockBody，我们需要先获取原始响应的 header (保持 content-type)，或者直接构造一个新的
+            // 这里简化处理：如果是脚本，content-type 设为 javascript，否则 json
+            let contentType = "application/json";
+            if (rule.resourceType === "Script")
+              contentType = "application/javascript";
+
+            return route.fulfill({
+              status: 200,
+              contentType: contentType,
+              body: rule.payload, // 这就是我们在前端输入的 JS 代码或 JSON
+            });
+          }
+
+          // 默认放行
+          return route.continue();
+        });
+      }
 
       page.on("close", () => handleExit("page_closed"));
 
@@ -154,7 +197,6 @@ const handlers = {
     }
   },
 
-  // 🔥 新增：RPC 控制指令
   async rpc_ctrl(data) {
     if (data.action === "start") {
       startRpcServer(data.port, page, sendRpcLog);
@@ -178,7 +220,7 @@ const handlers = {
   },
 
   async close() {
-    stopRpcServer(); // 关闭 RPC
+    stopRpcServer();
     sendEvent("status", "Browser Force Closed");
     process.exit(0);
   },
