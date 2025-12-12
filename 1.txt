@@ -1,0 +1,97 @@
+🚀 第一阶段：逆向深度增强 (核心缺失)
+目前的 Hook 只是简单的 console.log，这在面对复杂混淆代码（如 OB 混淆、Webpack）时几乎无力。你需要更强的代码介入能力。
+
+🔍 AST 混淆还原 / 动态替换 (AST Deobfuscator & Response Interceptor)
+
+现状：目前只能看日志，不能改代码。
+
+缺失功能：
+
+拦截 JS 响应：当浏览器请求 main.js 时，后端（Rust/Node）拦截响应体。
+
+AST 处理管道：集成 Babel/SWC，对混淆代码进行自动还原（如：字符串解密、控制流平坦化还原）。
+
+动态替换 (Fulfill)：将还原后的代码（或插入了探针的代码）返回给浏览器，让你在 F12 看到的是清晰的代码，而不是 _0x5f2a。
+
+Local Overrides UI：允许用户在界面上直接上传/编辑一个 JS 文件，并映射到特定的 URL。
+
+💉 动态代码注入 (Script Injection Manager)
+
+现状：只能用预设的几个 Hook。
+
+缺失功能：
+
+自定义脚本库：允许用户保存自己的 .js 脚本片段（如 crypto-js hook、rpc 导出脚本）。
+
+时机控制：选择注入时机（document-start 还是 load 后）。
+
+RPC 桥接：提供一个通用的 RPC 接口（类似 Sekiro），让用户能在 Postman/Python 里直接调用浏览器里的加密函数（如 await rpc.call('encrypt', payload)）。
+
+🕵️‍♂️ 堆栈追踪与导出 (Stack Tracer)
+
+现状：只打印了参数，不知道是谁调用的。
+
+缺失功能：
+
+当 Hook 触发时（比如 JSON.parse），自动捕获 new Error().stack。
+
+对堆栈进行SourceMap 还原（如果存在），定位到原始代码位置。
+
+一键导出堆栈上下文变量。
+
+🤖 第二阶段：自动化编排增强 (效率缺失)
+目前的“运行片段”只能跑一次性的代码，无法应对“滑块验证码”、“多步表单提交”等复杂场景。
+
+🧩 验证码自动识别 (Captcha Solver)
+
+现状：遇到验证码只能手点。
+
+缺失功能：
+
+元素截图：一键截取指定 Selector 的图片（验证码图片）。
+
+对接 AI：利用你已有的 call_gemini_service，把验证码图片发给 AI，获取坐标或文本。
+
+轨迹模拟：集成 ghost-cursor 或手写贝塞尔曲线算法，模拟真人鼠标轨迹滑动滑块（这是过滑块的关键）。
+
+📹 动作录制与回放 (Record & Replay)
+
+现状：写 Playwright 代码门槛高，效率低。
+
+缺失功能：
+
+开启录制模式：调用 npx playwright codegen 的核心逻辑。
+
+你在浏览器里点点点，右侧编辑器实时生成 Playwright 代码。
+
+支持将生成的代码保存为“宏”或“任务”。
+
+👁️ 可视化元素拾取器 (Element Inspector)
+
+现状：写代码时还要去 F12 找 class 或 xpath。
+
+缺失功能：
+
+点击界面上的“拾取”按钮 -> 鼠标移入浏览器高亮元素 -> 点击生成 await page.click('xpath=...') 代码到编辑器。
+
+🌐 第三阶段：网络与环境增强
+🌍 代理隧道与多指纹轮询
+
+现状：只能设置单一 URL，没看到代理设置。
+
+缺失功能：
+
+动态代理设置：支持 http/socks5 代理输入，甚至支持代理池 API。
+
+指纹库：不仅仅是随机，而是提供几套标准的“完美指纹”（如 Win10 Chrome 120, Mac Safari 17），一键切换，确保 Canvas/WebGL/Audio 指纹一致性。
+
+📝 总结：推荐优先实现的功能列表
+为了让你的 WebLab 真正成为“逆向神器”，我建议你按以下顺序补充功能：
+
+RPC 桥接 (WebSocket RPC)：让外部程序能调用浏览器内的函数（实现“扣代码”到“自动调用”的闭环）。
+
+请求拦截与替换 (Request Interception)：这是对抗混淆 JS 的基础。
+
+元素拾取器 (Inspector)：极大提高写自动化脚本的效率。
+
+验证码辅助 (Captcha Helper)：结合你的 AI 能力，做成杀手级功能。
