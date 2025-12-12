@@ -8,12 +8,10 @@ import {
   Checkbox,
   Typography,
   message,
-  Tabs,
   Space,
   Select,
   Collapse,
   Badge,
-  Tooltip,
   InputNumber,
   List,
   Modal,
@@ -32,7 +30,7 @@ import {
   GlobalOutlined,
   PlusOutlined,
   DeleteOutlined,
-  EditOutlined,
+  EyeOutlined, // 🔥 新增图标
 } from "@ant-design/icons";
 import Editor from "@monaco-editor/react";
 import { invoke } from "@tauri-apps/api/core";
@@ -43,32 +41,30 @@ const { Text } = Typography;
 const { Panel } = Collapse;
 const { TextArea } = Input;
 
-// 定义拦截规则接口
+// ... (InterceptRule 接口保持不变) ...
 interface InterceptRule {
   id: string;
   enabled: boolean;
-  urlPattern: string; // 譬如 "**/*.js" 或 "https://api.example.com/v1/user"
-  resourceType: string; // "Script", "XHR", "All"
+  urlPattern: string;
+  resourceType: string;
   action: "Abort" | "MockBody" | "MockFile";
-  payload: string; // 响应体内容 或 文件路径
+  payload: string;
 }
 
 const WebLab: React.FC = () => {
-  // ... (保留原有的 logs, url, config, engineStatus 等状态) ...
+  // ... (原有状态保持不变) ...
   const [logs, setLogs] = useState<string>("");
   const [url, setUrl] = useState("https://www.whoer.net");
   const [config, setConfig] = useState({
     browserType: "firefox",
     stealth: true,
     headless: false,
-    hooks: ["rpc_inject"],
+    hooks: ["json_hook", "rpc_inject"],
   });
 
-  // RPC 状态
   const [rpcPort, setRpcPort] = useState(9999);
   const [rpcRunning, setRpcRunning] = useState(false);
 
-  // 拦截规则状态
   const [interceptRules, setInterceptRules] = useState<InterceptRule[]>([]);
   const [isRuleModalOpen, setIsRuleModalOpen] = useState(false);
   const [currentRule, setCurrentRule] = useState<InterceptRule>({
@@ -85,26 +81,16 @@ const WebLab: React.FC = () => {
   const [code, setCode] = useState(
     `/**
  * ✨ Playwright 自动化脚本编辑器
- * * ✅ 全局预置对象 (无需 import，直接使用):
- * - page:    当前页面对象 (Playwright Page)
- * - context: 浏览器上下文 (BrowserContext)
- * - browser: 浏览器实例 (Browser)
- * * 🚀 支持 Top-level await，请在下方直接编写业务逻辑
+ * * 👁️ 点击上方 "拾取元素" 可快速生成代码
  */
 
 try {
-  console.log(">>> 开始执行脚本...");
-
-  // 1. 获取当前页面信息
+  console.log(">>> 开始执行...");
   const title = await page.title();
-  const url = page.url();
-  console.log(\`📄 标题: \${title}\`);
-  console.log(\`🔗 地址: \${url}\`);
-
-  console.log("<<< 脚本执行完毕");
+  console.log(\`页面标题: \${title}\`);
   return "Success";
 } catch (err) {
-  console.error("❌ 执行出错:", err.message);
+  console.error(err.message);
 }`
   );
 
@@ -114,10 +100,25 @@ try {
     engineStatus.includes("Running") ||
     engineStatus.includes("Launched");
 
-  // ... (保留 useEffect, listen 逻辑不变) ...
+  // 🔥🔥🔥 监听事件 🔥🔥🔥
   useEffect(() => {
     const unlisten = listen("weblab-event", (event: any) => {
       const { type, payload } = event.payload;
+
+      // 1. 处理拾取到的选择器 (核心新增)
+      if (type === "inspector_picked") {
+        message.success(`已拾取: ${payload}`);
+
+        // 自动插入代码到编辑器
+        const insertCode = `\n// 🎯 自动拾取\nawait page.click('${payload}');`;
+        setCode((prev) => prev + insertCode);
+
+        // 自动切回代码 Tab 方便查看
+        setActiveTab("code");
+        return;
+      }
+
+      // ... (原有状态逻辑保持不变) ...
       if (type === "status") {
         if (
           isManuallyStopping.current &&
@@ -168,7 +169,7 @@ try {
     };
   }, []);
 
-  // ... (保留 startEngine, stopEngine, runEval, toggleRpc 等函数不变) ...
+  // ... (startEngine, stopEngine 等保持不变) ...
   const startEngine = async () => {
     isManuallyStopping.current = false;
     if (!url || !url.startsWith("http")) {
@@ -186,7 +187,6 @@ try {
             browserType: config.browserType,
             headless: config.headless,
             hooks: config.hooks,
-            // 🔥🔥🔥 传递拦截规则给后端 🔥🔥🔥
             intercepts: interceptRules.filter((r) => r.enabled),
           },
         });
@@ -233,7 +233,17 @@ try {
     setActiveTab("console");
   };
 
-  // 规则管理函数
+  // 🔥🔥🔥 新增：开启拾取模式 🔥🔥🔥
+  const startInspector = async () => {
+    if (!isRunning) {
+      message.warning("请先启动浏览器");
+      return;
+    }
+    await invoke("send_web_command", { action: "toggle_inspector", data: {} });
+    message.loading("已进入拾取模式，请点击网页元素...", 2);
+  };
+
+  // ... (规则管理函数 addRule, saveRule, deleteRule 保持不变) ...
   const addRule = () => {
     setCurrentRule({
       id: Date.now().toString(),
@@ -245,7 +255,6 @@ try {
     });
     setIsRuleModalOpen(true);
   };
-
   const saveRule = () => {
     setInterceptRules((prev) => {
       const idx = prev.findIndex((r) => r.id === currentRule.id);
@@ -258,7 +267,6 @@ try {
     });
     setIsRuleModalOpen(false);
   };
-
   const deleteRule = (id: string) => {
     setInterceptRules((prev) => prev.filter((r) => r.id !== id));
   };
@@ -296,7 +304,6 @@ try {
       </div>
 
       <Collapse defaultActiveKey={["rpc", "env"]} ghost size="small">
-        {/* 1. RPC 桥接 */}
         <Panel
           header={
             <span>
@@ -346,7 +353,6 @@ try {
           </div>
         </Panel>
 
-        {/* 2. 环境伪造 */}
         <Panel
           header={
             <span>
@@ -383,7 +389,6 @@ try {
           </div>
         </Panel>
 
-        {/* 3. 请求拦截 (新增) */}
         <Panel
           header={
             <span>
@@ -437,7 +442,6 @@ try {
           </div>
         </Panel>
 
-        {/* 4. Hook 注入 */}
         <Panel
           header={
             <span>
@@ -535,7 +539,18 @@ try {
               超级控制台
             </Button>
           </Space>
+
           <Space>
+            {/* 🔥🔥🔥 新增：拾取按钮 🔥🔥🔥 */}
+            <Button
+              icon={<EyeOutlined />}
+              style={{ color: "#1890ff", borderColor: "#1890ff" }}
+              disabled={!isRunning}
+              onClick={startInspector}
+            >
+              拾取元素
+            </Button>
+
             {activeTab === "code" && (
               <Button
                 type="primary"
@@ -591,7 +606,6 @@ try {
         </div>
       </Content>
 
-      {/* 规则编辑弹窗 */}
       <Modal
         title="编辑拦截规则"
         open={isRuleModalOpen}

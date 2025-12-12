@@ -14,7 +14,7 @@ const HOOK_REGISTRY = {
   network_hook: networkHook,
   websocket_hook: websocketHook,
   crypto_hook: cryptoHook,
-  rpc_inject: rpcInjectHook
+  rpc_inject: rpcInjectHook,
 };
 
 /**

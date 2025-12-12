@@ -3,6 +3,7 @@ const stealthPlugin = require("puppeteer-extra-plugin-stealth");
 const readline = require("readline");
 const { injectHooks } = require("./hooks");
 const { startRpcServer, stopRpcServer, updatePage } = require("./rpc_server");
+const inspectorScript = require("./hooks/inspector_inject");
 
 chromium.use(stealthPlugin());
 
@@ -216,6 +217,31 @@ const handlers = {
       sendEvent("eval_result", result);
     } catch (e) {
       sendEvent("error", e.message);
+    }
+  },
+
+  async toggle_inspector(data) {
+    if (!page || !isBrowserActive) {
+      sendEvent("error", "请先启动浏览器");
+      return;
+    }
+
+    try {
+      // 1. 暴露回调函数给浏览器 (如果已暴露过会报错，所以要 try-catch)
+      try {
+        await page.exposeFunction("__weblab_onPick", (selector) => {
+          sendEvent("inspector_picked", selector); // 发回给前端
+        });
+      } catch (e) {
+        // Ignore if already bound
+      }
+
+      // 2. 注入 JS 脚本开启高亮
+      await page.evaluate(inspectorScript);
+
+      sendEvent("console", "[Inspector] 拾取模式已激活，请点击网页元素");
+    } catch (e) {
+      sendEvent("error", `Inspector Error: ${e.message}`);
     }
   },
 
