@@ -4,6 +4,7 @@ const antiDebugHook = require("./anti_debug");
 const networkHook = require("./network");
 const websocketHook = require("./websocket");
 const cryptoHook = require("./crypto");
+const rpcInjectHook = require('./rpc_inject');
 
 // 映射表：Key 必须和前端传过来的 value 一致
 const HOOK_REGISTRY = {
@@ -13,6 +14,7 @@ const HOOK_REGISTRY = {
   network_hook: networkHook,
   websocket_hook: websocketHook,
   crypto_hook: cryptoHook,
+  rpc_inject: rpcInjectHook
 };
 
 /**

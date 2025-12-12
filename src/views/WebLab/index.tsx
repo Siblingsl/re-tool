@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react"; // 🔥 引入 useRef
+import React, { useState, useEffect, useRef } from "react";
 import {
   Layout,
   Card,
@@ -8,9 +8,12 @@ import {
   Checkbox,
   Typography,
   message,
-  Tabs,
   Space,
   Select,
+  Collapse,
+  Badge,
+  Tooltip,
+  InputNumber,
 } from "antd";
 import {
   BugOutlined,
@@ -21,6 +24,8 @@ import {
   CodeOutlined,
   ClearOutlined,
   SettingOutlined,
+  ApiOutlined,
+  ThunderboltOutlined,
 } from "@ant-design/icons";
 import Editor from "@monaco-editor/react";
 import { invoke } from "@tauri-apps/api/core";
@@ -28,48 +33,60 @@ import { listen } from "@tauri-apps/api/event";
 
 const { Content, Sider } = Layout;
 const { Text } = Typography;
+const { Panel } = Collapse;
 
 const WebLab: React.FC = () => {
   const [logs, setLogs] = useState<string>("");
-  const [url, setUrl] = useState("");
+  const [url, setUrl] = useState("https://www.whoer.net");
   const [config, setConfig] = useState({
     browserType: "firefox",
     stealth: true,
     headless: false,
-    hooks: [""],
+    hooks: ["json_hook", "rpc_inject"], // 默认开启 RPC 注入
   });
+
+  // RPC 状态
+  const [rpcPort, setRpcPort] = useState(9999);
+  const [rpcRunning, setRpcRunning] = useState(false);
 
   const [engineStatus, setEngineStatus] = useState("Stopped");
   const [activeTab, setActiveTab] = useState("code");
   const [code, setCode] = useState(
-    "// 在此处输入 Playwright 代码\n// const title = await page.title();\n// console.log(title);"
+    `/**
+ * ✨ Playwright 自动化脚本编辑器
+ * * 🚀 支持 Node.js 环境下 Playwright API
+ * * 💡 提示：使用 await page.evaluate(() => {...}) 在浏览器内执行 JS
+ */
+
+try {
+  console.log(">>> 开始执行...");
+  const title = await page.title();
+  console.log(\`页面标题: \${title}\`);
+  return "Success";
+} catch (err) {
+  console.error(err.message);
+}`
   );
 
-  // 🔥🔥🔥 核心修复 1: 停止锁 Ref 🔥🔥🔥
-  // 用于解决：点击停止后，后端延迟传来的“运行中”消息把状态改回去的问题
   const isManuallyStopping = useRef(false);
 
-  // 🔥🔥🔥 核心修复 2: 状态判断改为白名单模式 (更稳健) 🔥🔥🔥
-  // 只有明确包含 "Launch" 关键字的状态才认为是运行中，其他一律视为停止
   const isRunning =
-    engineStatus.includes("Launch") || engineStatus.includes("Running");
+    engineStatus.includes("Launch") ||
+    engineStatus.includes("Running") ||
+    engineStatus.includes("Launched");
 
   useEffect(() => {
     const unlisten = listen("weblab-event", (event: any) => {
       const { type, payload } = event.payload;
 
-      // 1. 处理状态变更
+      // 状态处理
       if (type === "status") {
-        // 🔥 如果正在手动停止中，且收到的消息不是“已停止”，则直接忽略
-        // 防止：点击停止 -> UI变绿 -> 后端延迟传来 "Browser Launched" -> UI又变红
         if (
           isManuallyStopping.current &&
           payload !== "Stopped" &&
           payload !== "Browser Closed"
-        ) {
-          console.log("忽略延迟状态:", payload);
+        )
           return;
-        }
 
         if (
           payload === "Browser Closed" ||
@@ -77,7 +94,7 @@ const WebLab: React.FC = () => {
           payload === "Stopped"
         ) {
           setEngineStatus("Stopped");
-          // 收到后端确认停止的消息后，解锁
+          setRpcRunning(false); // 浏览器关了，RPC 也就断了
           isManuallyStopping.current = false;
           if (payload === "Browser Closed") message.info("浏览器已关闭");
         } else {
@@ -85,12 +102,8 @@ const WebLab: React.FC = () => {
         }
       }
 
-      // 2. 处理错误消息
       if (type === "error") {
-        if (
-          payload.includes("Launch Failed") ||
-          payload.includes("Navigation failed")
-        ) {
+        if (payload.includes("Launch Failed")) {
           setEngineStatus("Stopped");
           isManuallyStopping.current = false;
         }
@@ -99,7 +112,15 @@ const WebLab: React.FC = () => {
         return;
       }
 
-      // 3. 处理日志
+      // RPC 日志特殊处理
+      if (type === "rpc_log") {
+        const time = new Date().toLocaleTimeString();
+        if (payload.includes("已启动")) setRpcRunning(true);
+        if (payload.includes("已停止")) setRpcRunning(false);
+        setLogs((prev) => prev + `\n[${time}] [RPC] ${payload}`);
+        return;
+      }
+
       const time = new Date().toLocaleTimeString();
       let logLine = `[${time}] [${type}] `;
       if (typeof payload === "object") {
@@ -116,22 +137,14 @@ const WebLab: React.FC = () => {
   }, []);
 
   const startEngine = async () => {
-    // 启动前重置锁
     isManuallyStopping.current = false;
-
-    if (!url || !url.trim()) {
-      message.warning("请输入有效的目标 URL");
-      return;
-    }
-    if (!url.startsWith("http")) {
-      message.warning("URL 必须以 http:// 或 https:// 开头");
+    if (!url || !url.startsWith("http")) {
+      message.warning("请输入有效的 HTTP/HTTPS URL");
       return;
     }
 
     try {
-      // 先把状态设为启动中，防止用户连点
       setEngineStatus("Launching...");
-
       await invoke("start_web_engine");
       setTimeout(async () => {
         await invoke("send_web_command", {
@@ -143,7 +156,7 @@ const WebLab: React.FC = () => {
             hooks: config.hooks,
           },
         });
-        message.success("发送启动指令...");
+        message.success("启动指令已发送");
       }, 500);
     } catch (e) {
       message.error("启动失败: " + e);
@@ -152,37 +165,45 @@ const WebLab: React.FC = () => {
   };
 
   const stopEngine = async () => {
-    // 🔥🔥🔥 核心修复 3: 立即上锁并更新 UI 🔥🔥🔥
     isManuallyStopping.current = true;
     setEngineStatus("Stopped");
-    message.info("正在强制停止引擎...");
-
+    setRpcRunning(false);
     try {
       await invoke("stop_web_engine");
-      // 1秒后自动解锁（兜底，防止万一后端没发回 Stopped 消息）
       setTimeout(() => {
         isManuallyStopping.current = false;
       }, 1000);
     } catch (e) {
-      console.error("停止失败:", e);
-      isManuallyStopping.current = false;
+      console.error(e);
     }
+  };
+
+  // 控制 RPC 服务
+  const toggleRpc = async () => {
+    if (!isRunning) {
+      message.warning("请先启动浏览器");
+      return;
+    }
+    const action = rpcRunning ? "stop" : "start";
+    await invoke("send_web_command", {
+      action: "rpc_ctrl",
+      data: { action, port: rpcPort },
+    });
   };
 
   const runEval = async () => {
     if (!isRunning) {
-      message.warning("请先启动浏览器引擎");
+      message.warning("请先启动浏览器");
       return;
     }
-    await invoke("send_web_command", {
-      action: "eval",
-      data: code,
-    });
+    await invoke("send_web_command", { action: "eval", data: code });
     setActiveTab("console");
   };
 
+  // 左侧配置面板 (使用 Collapse 优化结构)
   const ConfigPanel = () => (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* 状态栏 */}
       <div
         style={{
           padding: "12px",
@@ -192,105 +213,139 @@ const WebLab: React.FC = () => {
           textAlign: "center",
           color: !isRunning ? "#cf1322" : "#389e0d",
           fontWeight: "bold",
+          display: "flex",
+          justifyContent: "center",
+          alignItems: "center",
+          gap: 8,
         }}
       >
-        {!isRunning ? "🔴 引擎未运行" : "🟢 引擎运行中"}
+        <Badge status={!isRunning ? "error" : "processing"} />
+        {!isRunning ? "引擎未运行" : "引擎运行中"}
       </div>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         <Text strong>目标 URL</Text>
         <Input
           value={url}
           onChange={(e) => setUrl(e.target.value)}
-          placeholder="请输入有效 URL 地址"
-          allowClear
+          placeholder="https://example.com"
+          status={!url ? "error" : ""}
         />
       </div>
 
-      <Card
-        size="small"
-        title={
-          <span>
-            <SettingOutlined /> 环境伪造
-          </span>
-        }
-      >
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              浏览器内核
-            </Text>
+      <Collapse defaultActiveKey={["rpc", "env"]} ghost size="small">
+        {/* 1. RPC 桥接 (核心功能) */}
+        <Panel
+          header={
+            <span>
+              <ApiOutlined /> RPC 桥接服务
+            </span>
+          }
+          key="rpc"
+        >
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+              }}
+            >
+              <Text>端口 (WS)</Text>
+              <InputNumber
+                value={rpcPort}
+                onChange={(v) => setRpcPort(v || 9999)}
+                disabled={rpcRunning}
+              />
+            </div>
+            <Button
+              type={rpcRunning ? "default" : "primary"}
+              danger={rpcRunning}
+              icon={<ThunderboltOutlined />}
+              onClick={toggleRpc}
+              block
+              disabled={!isRunning}
+            >
+              {rpcRunning ? "关闭 RPC 服务" : "开启 RPC 服务"}
+            </Button>
+            {rpcRunning && (
+              <div
+                style={{
+                  fontSize: 12,
+                  color: "#10b981",
+                  background: "#ecfdf5",
+                  padding: 8,
+                  borderRadius: 4,
+                }}
+              >
+                服务地址: ws://127.0.0.1:{rpcPort}
+              </div>
+            )}
+          </div>
+        </Panel>
+
+        {/* 2. 环境伪造 */}
+        <Panel
+          header={
+            <span>
+              <SettingOutlined /> 环境伪造
+            </span>
+          }
+          key="env"
+        >
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             <Select
               value={config.browserType}
               onChange={(v) => setConfig({ ...config, browserType: v })}
               options={[
-                { value: "chromium", label: "Chromium (Chrome/Edge)" },
                 { value: "firefox", label: "Firefox (Gecko)" },
+                { value: "chromium", label: "Chromium (Chrome)" },
                 { value: "webkit", label: "WebKit (Safari)" },
               ]}
+              style={{ width: "100%" }}
             />
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span>隐身模式 (Stealth)</span>
+              <Switch
+                checked={config.stealth}
+                onChange={(v) => setConfig({ ...config, stealth: v })}
+              />
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span>无头模式 (Headless)</span>
+              <Switch
+                checked={config.headless}
+                onChange={(v) => setConfig({ ...config, headless: v })}
+              />
+            </div>
           </div>
+        </Panel>
 
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-            }}
-          >
-            <span>隐身模式 (Stealth)</span>
-            <Switch
-              checked={config.stealth}
-              onChange={(v) => setConfig({ ...config, stealth: v })}
-            />
-          </div>
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-            }}
-          >
-            <span>无头模式 (Headless)</span>
-            <Switch
-              checked={config.headless}
-              onChange={(v) => setConfig({ ...config, headless: v })}
-            />
-          </div>
-        </div>
-      </Card>
+        {/* 3. Hook 注入 */}
+        <Panel
+          header={
+            <span>
+              <BugOutlined /> 注入 Hook
+            </span>
+          }
+          key="hooks"
+        >
+          <Checkbox.Group
+            style={{ display: "flex", flexDirection: "column", gap: 8 }}
+            options={[
+              { label: "RPC 注入 (必需)", value: "rpc_inject", disabled: true },
+              { label: "JSON.parse 监控", value: "json_hook" },
+              { label: "XHR/Fetch 监控", value: "network_hook" },
+              { label: "Cookie 变化监控", value: "cookie_hook" },
+              { label: "Debugger 绕过", value: "anti_debug" },
+            ]}
+            value={config.hooks}
+            onChange={(v) => setConfig({ ...config, hooks: v as string[] })}
+          />
+        </Panel>
+      </Collapse>
 
-      <Card
-        size="small"
-        title={
-          <span>
-            <BugOutlined /> 注入 Hook
-          </span>
-        }
-      >
-        <Checkbox.Group
-          style={{ display: "flex", flexDirection: "column", gap: 8 }}
-          options={[
-            { label: "JSON.parse/stringify 监控", value: "json_hook" },
-            { label: "XHR/Fetch 网络请求监控", value: "network_hook" },
-            { label: "Cookie 变化监控", value: "cookie_hook" },
-            { label: "WebSocket 消息监控", value: "websocket_hook" },
-            { label: "Web Crypto 加密监控", value: "crypto_hook" },
-            { label: "Debugger 反调试绕过", value: "anti_debug" },
-          ]}
-          value={config.hooks}
-          onChange={(v) => setConfig({ ...config, hooks: v as string[] })}
-        />
-      </Card>
-
-      <div
-        style={{
-          marginTop: "auto",
-          display: "flex",
-          flexDirection: "column",
-          gap: 10,
-        }}
-      >
+      <div style={{ marginTop: "auto" }}>
         {!isRunning ? (
           <Button
             type="primary"
@@ -364,7 +419,6 @@ const WebLab: React.FC = () => {
               超级控制台
             </Button>
           </Space>
-
           <Space>
             {activeTab === "code" && (
               <Button
@@ -377,7 +431,7 @@ const WebLab: React.FC = () => {
             )}
             {activeTab === "console" && (
               <Button icon={<ClearOutlined />} onClick={() => setLogs("")}>
-                清空日志
+                清空
               </Button>
             )}
           </Space>
@@ -399,12 +453,10 @@ const WebLab: React.FC = () => {
               options={{
                 minimap: { enabled: false },
                 fontSize: 14,
-                scrollBeyondLastLine: false,
                 automaticLayout: true,
               }}
             />
           </div>
-
           <div
             style={{
               display: activeTab === "console" ? "block" : "none",

@@ -2,6 +2,7 @@ const { chromium, firefox, webkit } = require("playwright-extra");
 const stealthPlugin = require("puppeteer-extra-plugin-stealth");
 const readline = require("readline");
 const { injectHooks } = require("./hooks");
+const { startRpcServer, stopRpcServer, updatePage } = require("./rpc_server"); // 🔥 引入 RPC
 
 // 仅 Chromium 支持完美隐身
 chromium.use(stealthPlugin());
@@ -9,7 +10,7 @@ chromium.use(stealthPlugin());
 let browser = null;
 let context = null;
 let page = null;
-let isBrowserActive = false; // 🔥 全局运行状态锁
+let isBrowserActive = false;
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -20,19 +21,23 @@ const rl = readline.createInterface({
 const sendEvent = (type, payload) => {
   try {
     console.log(JSON.stringify({ type, payload }));
-  } catch (e) {
-    // ignore json error
-  }
+  } catch (e) {}
 };
 
-// 🔥 统一的退出处理器
+// 发送 RPC 专用日志
+const sendRpcLog = (msg) => {
+  sendEvent("rpc_log", msg);
+};
+
 const handleExit = (source) => {
-  // 只要标记为活跃，收到任何一个关闭信号都执行清理
   if (isBrowserActive) {
-    isBrowserActive = false; // 立即锁死，防止重复发送
+    isBrowserActive = false;
     sendEvent("status", "Browser Closed");
 
-    // 尝试清理引用
+    // 浏览器关闭时，是否要关闭 RPC 服务？
+    // 策略：保持 RPC 服务开启，但置空 page，等待下次启动自动重连
+    updatePage(null);
+
     browser = null;
     context = null;
     page = null;
@@ -46,7 +51,6 @@ const handlers = {
       return;
     }
 
-    // 🔥 校验 URL
     if (
       !config.url ||
       typeof config.url !== "string" ||
@@ -58,10 +62,15 @@ const handlers = {
 
     const isHeadless = config.headless !== false;
     const browserType = config.browserType || "firefox";
+
+    // 🔥 强制注入 RPC Hook (默认开启)
     const activeHooks = config.hooks || [];
+    if (!activeHooks.includes("rpc_inject")) {
+      activeHooks.push("rpc_inject");
+    }
 
     sendEvent("status", `Launching ${browserType}...`);
-    isBrowserActive = true; // 🔥 标记为开始运行
+    isBrowserActive = true;
 
     try {
       let launcher;
@@ -91,7 +100,6 @@ const handlers = {
         args: launchArgs,
       });
 
-      // 🔥 监听 1: 浏览器进程断开
       browser.on("disconnected", () => handleExit("browser_disconnected"));
 
       context = await browser.newContext({
@@ -105,7 +113,6 @@ const handlers = {
             : undefined,
       });
 
-      // 🔥 监听 2: 上下文关闭 (用户点击窗口X通常触发这个)
       context.on("close", () => handleExit("context_closed"));
 
       await context.addInitScript(() => {
@@ -122,7 +129,9 @@ const handlers = {
 
       page = await context.newPage();
 
-      // 🔥 监听 3: 页面关闭 (用户关闭唯一标签页)
+      // 🔥 更新 RPC 服务的页面引用
+      updatePage(page);
+
       page.on("close", () => handleExit("page_closed"));
 
       page.on("console", (msg) => {
@@ -133,23 +142,25 @@ const handlers = {
 
       await injectHooks(page, activeHooks);
 
-      // 设置超时
       await page.goto(config.url, { timeout: 30000 });
 
-      // 如果到了这一步，说明加载完成，但还没有关闭
-      // 此时 isBrowserActive 依然是 true
       sendEvent("status", `Browser Launched (${browserType})`);
     } catch (e) {
-      // 只有当不是因为"浏览器被关闭"导致的错误时，才报错
-      // 比如：如果用户在加载中关闭了，handleExit 会先执行将 isBrowserActive 设为 false
-      // 这里的 catch 会捕获到 Target closed 错误
-
       if (isBrowserActive) {
         sendEvent("error", `Launch Failed: ${e.message}`);
-        // 尝试强制关闭以重置
         if (browser) await browser.close().catch(() => {});
         handleExit("launch_error");
       }
+    }
+  },
+
+  // 🔥 新增：RPC 控制指令
+  async rpc_ctrl(data) {
+    if (data.action === "start") {
+      startRpcServer(data.port, page, sendRpcLog);
+    } else if (data.action === "stop") {
+      stopRpcServer();
+      sendRpcLog("RPC 服务已停止");
     }
   },
 
@@ -167,6 +178,7 @@ const handlers = {
   },
 
   async close() {
+    stopRpcServer(); // 关闭 RPC
     sendEvent("status", "Browser Force Closed");
     process.exit(0);
   },
@@ -177,7 +189,6 @@ rl.on("line", (line) => {
     const msg = JSON.parse(line);
     if (handlers[msg.action]) {
       handlers[msg.action](msg.data).catch((e) => {
-        // 顶层捕获，防止崩掉
         if (isBrowserActive) sendEvent("error", e.toString());
       });
     }
