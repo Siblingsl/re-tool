@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { useLiveQuery } from "dexie-react-hooks";
 import {
   AppleFilled,
   AndroidFilled,
@@ -29,6 +30,18 @@ import {
   CompassOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  AppstoreOutlined,
+  RobotOutlined,
+  PlusOutlined,
+  MessageOutlined,
+  DeleteOutlined,
+  SettingOutlined,
+  LaptopOutlined,
+  ApiOutlined,
+  InfoCircleOutlined,
+  BgColorsOutlined,
+  CheckCircleFilled,
+  ExclamationCircleFilled,
 } from "@ant-design/icons";
 import {
   Avatar,
@@ -44,10 +57,18 @@ import {
   Tag,
   theme,
   Tooltip,
+  Segmented,
+  Divider,
+  Switch,
+  Radio,
+  Table,
+  Space,
+  Popconfirm,
 } from "antd";
 import { Device, ViewMode } from "../types";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { db } from "@/db";
 
 interface SidebarProps {
   currentView: ViewMode;
@@ -67,6 +88,13 @@ interface ToolItem {
   icon: React.ReactNode;
   hasVersions?: boolean;
   hasArch?: boolean;
+}
+
+interface ChatSession {
+  id: string;
+  title: string;
+  date: string;
+  lastUpdated: number;
 }
 
 const toolsList: ToolItem[] = [
@@ -105,6 +133,13 @@ const ARCH_OPTIONS = [
   { label: "x86 (模拟器)", value: "x86" },
 ];
 
+const DEFAULT_PROVIDERS = [
+  { value: "openai", label: "OpenAI (GPT-4o / GPT-3.5)" },
+  { value: "deepseek", label: "DeepSeek (深度求索)" },
+  { value: "anthropic", label: "Anthropic (Claude 3.5)" },
+  { value: "custom", label: "自定义 / 本地模型 (Ollama)" },
+];
+
 const Sidebar: React.FC<SidebarProps> = ({
   currentView,
   onViewChange,
@@ -115,10 +150,15 @@ const Sidebar: React.FC<SidebarProps> = ({
   deviceAliases,
   onRenameDevice,
 }) => {
+  type SettingTab = "general" | "env" | "tools" | "about" | "ai";
   const { token } = theme.useToken();
   const [collapsed, setCollapsed] = useState(false);
 
-  // --- 状态管理 ---
+  const [sidebarMode, setSidebarMode] = useState<"tools" | "ai">("tools");
+  const [activeSettingTab, setActiveSettingTab] =
+    useState<SettingTab>("general");
+  const [isAddModelModalOpen, setIsAddModelModalOpen] = useState(false);
+
   const [isConnectModalOpen, setIsConnectModalOpen] = useState(false);
   const [ipAddress, setIpAddress] = useState("");
   const [connecting, setConnecting] = useState(false);
@@ -147,7 +187,87 @@ const Sidebar: React.FC<SidebarProps> = ({
     {}
   );
 
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
+  const [isAiRenameModalOpen, setIsAiRenameModalOpen] = useState(false);
+  const [currentEditingSession, setCurrentEditingSession] =
+    useState<ChatSession | null>(null);
+  const [newTitle, setNewTitle] = useState("");
+
+  // ✅ 新增：管理服务商列表的状态
+  const [providers, setProviders] = useState(DEFAULT_PROVIDERS);
+
+  // ✅ 新增：用于获取添加模型表单数据的 Form 实例
+  const [addModelForm] = Form.useForm();
+
+  const chatList =
+    useLiveQuery(
+      () => db.chatSessions.orderBy("lastUpdated").reverse().toArray(),
+      []
+    ) || [];
+
+  const [isAiConfigModalOpen, setIsAiConfigModalOpen] = useState(false);
+  const [editingConfig, setEditingConfig] = useState<any>(null); // 当前正在编辑的配置
+  const [aiConfigForm] = Form.useForm(); // 表单实例
+  const aiConfigs = useLiveQuery(() => db.aiConfigs.toArray(), []) || [];
+
+  // ✅ 处理：打开添加/编辑弹窗
+  const handleOpenAiConfig = (config: any = null) => {
+    setEditingConfig(config);
+    if (config) {
+      aiConfigForm.setFieldsValue(config); // 编辑模式：回填数据
+    } else {
+      aiConfigForm.resetFields(); // 添加模式：重置表单
+      // 设置默认值
+      aiConfigForm.setFieldsValue({
+        provider: "openai",
+        baseUrl: "https://api.openai.com/v1",
+      });
+    }
+    setIsAiConfigModalOpen(true);
+  };
+
+  // ✅ 处理：保存配置
+  const handleSaveAiConfig = async () => {
+    try {
+      const values = await aiConfigForm.validateFields();
+
+      if (editingConfig) {
+        // 更新现有
+        await db.aiConfigs.update(editingConfig.id, values);
+        message.success("配置已更新");
+      } else {
+        // 新增
+        // 如果是第一个配置，默认设为激活
+        const count = await db.aiConfigs.count();
+        await db.aiConfigs.add({ ...values, isActive: count === 0 });
+        message.success("添加成功");
+      }
+      setIsAiConfigModalOpen(false);
+    } catch (error) {
+      console.error("验证失败:", error);
+    }
+  };
+
+  // ✅ 处理：删除配置
+  const handleDeleteAiConfig = async (id: number) => {
+    await db.aiConfigs.delete(id);
+    message.success("已删除");
+  };
+
+  // ✅ 处理：设为激活 (互斥逻辑)
+  const handleSetActive = async (id: number) => {
+    await db.transaction("rw", db.aiConfigs, async () => {
+      // 1.先把所有配置设为 false
+      await db.aiConfigs.toCollection().modify({ isActive: false });
+      // 2.把当前点击的设为 true
+      await db.aiConfigs.update(id, { isActive: true });
+    });
+    message.success("已切换当前使用的模型");
+  };
+
   const checkAllRootStatus = async () => {
+    // ... existing logic ...
     const statusMap: Record<string, boolean> = {};
     await Promise.all(
       devices.map(async (dev) => {
@@ -167,6 +287,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   };
 
   const checkAllFridaStatus = async () => {
+    // ... existing logic ...
     const statusMap: Record<string, boolean> = {};
     await Promise.all(
       devices.map(async (dev) => {
@@ -197,6 +318,7 @@ const Sidebar: React.FC<SidebarProps> = ({
     return () => clearInterval(timer);
   }, [devices]);
 
+  // ... (keeping other helper functions like fetchFridaVersions, detectAbi, etc. exactly the same) ...
   const fetchFridaVersions = async () => {
     setLoadingVersions(true);
     try {
@@ -388,7 +510,7 @@ const Sidebar: React.FC<SidebarProps> = ({
     executeDeploy();
   };
 
-  const handleRenameSubmit = () => {
+  const handleAiRenameSubmit = () => {
     if (currentRenameDevice && newDeviceName.trim()) {
       onRenameDevice(currentRenameDevice.id, newDeviceName.trim());
       message.success("重命名成功");
@@ -449,7 +571,31 @@ const Sidebar: React.FC<SidebarProps> = ({
     }
   };
 
+  const handleSidebarModeChange = () => {
+    if (sidebarMode === "tools") {
+      setSidebarMode("ai");
+      onViewChange("ai-chat" as any);
+    } else {
+      setSidebarMode("tools");
+      onViewChange("device");
+    }
+  };
+
+  const handleNewChat = async () => {
+    const newId = Date.now().toString();
+    const newSession: ChatSession = {
+      id: newId,
+      title: "新对话",
+      date: "刚刚",
+      lastUpdated: Date.now(),
+    };
+    await db.chatSessions.add(newSession);
+    message.success("已创建新对话");
+    onViewChange(`ai-chat-${newId}` as any);
+  };
+
   const handleStartFrida = async (device: Device) => {
+    // ... (logic same as before)
     const hideCheckLoading = message.loading("正在检测环境...", 0);
     try {
       const isInstalled = await invoke<boolean>("check_frida_installed", {
@@ -524,6 +670,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   };
 
   const handleStopFrida = async (device: Device) => {
+    // ... (logic same as before)
     const hideLoading = message.loading("正在停止 Frida Server...", 0);
     try {
       await invoke("run_command", {
@@ -659,6 +806,168 @@ const Sidebar: React.FC<SidebarProps> = ({
     </Tooltip>
   );
 
+  // ✅ 2. Use handleDeleteSession in proper context
+  const handleDeleteSession = (e: any, session: ChatSession) => {
+    // Using 'any' for event here to simplify call from dropdown
+    Modal.confirm({
+      title: "删除对话",
+      icon: <ExclamationCircleFilled />,
+      content: `确定要删除 "${session.title}" 吗？此操作无法恢复。`,
+      okText: "删除",
+      okType: "danger",
+      cancelText: "取消",
+      onOk: async () => {
+        try {
+          await db.transaction(
+            "rw",
+            db.chatSessions,
+            db.chatMessages,
+            async () => {
+              await db.chatMessages.where({ sessionId: session.id }).delete();
+              await db.chatSessions.delete(session.id);
+            }
+          );
+          message.success("对话已删除");
+          if (currentView === (`ai-chat-${session.id}` as any)) {
+            // Optional: redirect logic
+          }
+        } catch (error) {
+          console.error("删除失败:", error);
+          message.error("删除失败");
+        }
+      },
+    });
+  };
+
+  // ✅ 3. Use openRenameModal in proper context
+  const openRenameModal = (e: any, session: ChatSession) => {
+    // e?.stopPropagation(); // Optional if called from menu item
+    setCurrentEditingSession(session);
+    setNewTitle(session.title);
+    setIsAiRenameModalOpen(true);
+  };
+
+  // ✅ 4. Submit rename
+  const handleRenameSubmit = async () => {
+    if (currentEditingSession && newTitle.trim()) {
+      await db.chatSessions.update(currentEditingSession.id, {
+        title: newTitle.trim(),
+      });
+      message.success("重命名成功");
+      setIsAiRenameModalOpen(false);
+      setCurrentEditingSession(null);
+    }
+  };
+
+  const renderChatHistoryItem = (session: ChatSession) => {
+    const viewId = `ai-chat-${session.id}`;
+    const isActive = currentView === (viewId as any);
+
+    // Dropdown menu configuration using the newly defined functions
+    const menuItems: MenuProps["items"] = [
+      {
+        key: "rename",
+        label: "重命名",
+        icon: <EditOutlined />,
+        onClick: ({ domEvent }) => {
+          domEvent.stopPropagation();
+          openRenameModal(domEvent, session); // ✅ Connected here
+        },
+      },
+      {
+        type: "divider",
+      },
+      {
+        key: "delete",
+        label: "删除",
+        icon: <DeleteOutlined />,
+        danger: true,
+        onClick: ({ domEvent }) => {
+          domEvent.stopPropagation();
+          handleDeleteSession(domEvent, session); // ✅ Connected here
+        },
+      },
+    ];
+
+    return (
+      <div
+        key={session.id}
+        className={`nav-item chat-item-group ${isActive ? "active" : ""}`}
+        onClick={() => onViewChange(viewId as any)}
+        style={{
+          justifyContent: collapsed ? "center" : "flex-start",
+          padding: collapsed ? "0 0" : "8px 16px",
+          minHeight: 20,
+          maxHeight: 30,
+          cursor: "pointer",
+          display: "flex",
+          alignItems: "center",
+          position: "relative",
+        }}
+      >
+        <MessageOutlined
+          style={{
+            fontSize: 16,
+            color: isActive ? token.colorPrimary : "#666",
+            flexShrink: 0,
+          }}
+        />
+        {!collapsed && (
+          <>
+            <div
+              style={{
+                marginLeft: 10,
+                flex: 1,
+                overflow: "hidden",
+                paddingRight: 20,
+              }}
+            >
+              <div
+                style={{
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  fontSize: 13,
+                  color: "var(--text-color)",
+                }}
+              >
+                {session.title}
+              </div>
+              <div style={{ fontSize: 11, color: "#999" }}>{session.date}</div>
+            </div>
+
+            <div
+              className="chat-action-btn"
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                position: "absolute",
+                right: 8,
+                top: "50%",
+                transform: "translateY(-50%)",
+              }}
+            >
+              <Dropdown menu={{ items: menuItems }} trigger={["click"]}>
+                <div
+                  style={{
+                    padding: 4,
+                    borderRadius: 4,
+                    color: "#666",
+                    display: "flex",
+                    alignItems: "center",
+                  }}
+                  className="hover-bg"
+                >
+                  <MoreOutlined style={{ fontSize: 16 }} />
+                </div>
+              </Dropdown>
+            </div>
+          </>
+        )}
+      </div>
+    );
+  };
+
+  // ... (Return block and Modals - identical to your previous version, just ensuring Modal uses correct props) ...
   return (
     <div
       className="sidebar"
@@ -667,20 +976,24 @@ const Sidebar: React.FC<SidebarProps> = ({
         transition: "width 0.2s cubic-bezier(0.2, 0, 0, 1) 0s",
         display: "flex",
         flexDirection: "column",
-        height: "100%", // 关键：撑满父容器高度
-        overflow: "hidden", // 关键：防止侧边栏整体滚动
+        height: "100%",
+        overflow: "hidden",
         position: "relative",
       }}
     >
-      {/* 隐藏滚动条的 CSS Hack */}
       <style>
         {`
-          .no-scrollbar::-webkit-scrollbar {
-            display: none;
-          }
+          .no-scrollbar::-webkit-scrollbar { display: none; }
+          .ant-segmented-item-label { display: flex; align-items: center; justify-content: center; gap: 6px; }
+          
+          .chat-action-btn { opacity: 0; transition: opacity 0.2s; }
+          .chat-item-group:hover .chat-action-btn { opacity: 1; }
+          
+          .hover-bg:hover { background-color: rgba(0,0,0,0.06); }
         `}
       </style>
 
+      {/* ... Headers, Device List ... */}
       {/* 1. 顶部 Header (固定) */}
       <div
         className="sidebar-header"
@@ -721,6 +1034,7 @@ const Sidebar: React.FC<SidebarProps> = ({
               cursor: "pointer",
               fontSize: collapsed ? 18 : 14,
               color: "var(--accent-color)",
+              marginBottom: collapsed ? 4 : 0,
             }}
             onClick={() => setIsConnectModalOpen(true)}
           />
@@ -733,14 +1047,16 @@ const Sidebar: React.FC<SidebarProps> = ({
         style={{
           // 关键逻辑：
           // flex: "0 1 auto" 表示初始高度根据内容自适应，但允许缩小
-          // maxHeight: "40%" 限制设备列表最多占据 40% 的高度，防止挤占工具箱
+          // maxHeight: "35%" 稍微调小一点，留更多空间给下方的双模式区域
           flex: "0 1 auto",
-          maxHeight: "40%",
+          maxHeight: "35%",
           overflowY: "auto", // 开启垂直滚动
           overflowX: "hidden",
           scrollbarWidth: "none", // Firefox 隐藏滚动条
           msOverflowStyle: "none", // IE 隐藏滚动条
           marginBottom: 8,
+          borderBottom: "1px solid rgba(0,0,0,0.03)",
+          paddingBottom: 8,
         }}
       >
         {devices.length === 0 && !collapsed && (
@@ -867,30 +1183,84 @@ const Sidebar: React.FC<SidebarProps> = ({
         ))}
       </div>
 
-      {/* 4. 工具箱标题栏 (固定) */}
+      {/* 4. 模式切换标题栏 (替代原工具箱标题) */}
       <div
         className="sidebar-section-title"
         style={{
-          display: collapsed ? "none" : "block",
+          display: collapsed ? "none" : "flex", // 折叠时隐藏，由下方图标控制
+          justifyContent: "space-between", // 关键：两端对齐
+          alignItems: "center", // 垂直居中
+          paddingRight: 8, // 右侧稍微留点空隙给按钮
           marginBottom: 10,
-          whiteSpace: "nowrap",
-          flexShrink: 0, // 禁止被压缩
+          flexShrink: 0,
+          height: 32, // 固定高度保持对齐
         }}
       >
-        工具箱
+        {/* 左侧：动态标题 */}
+        <span style={{ fontWeight: 600, fontSize: 14 }}>
+          {sidebarMode === "tools" ? "工具箱" : "智能协作"}
+        </span>
+
+        {/* 右侧：切换按钮 */}
+        <Tooltip
+          title={sidebarMode === "tools" ? "切换到 AI 助手" : "返回工具箱列表"}
+          placement="right"
+        >
+          <Button
+            type="text"
+            size="small"
+            icon={
+              sidebarMode === "tools" ? (
+                <RobotOutlined
+                  style={{ color: "var(--accent-color)", fontSize: 16 }}
+                />
+              ) : (
+                <AppstoreOutlined style={{ color: "#666", fontSize: 16 }} />
+              )
+            }
+            // 🔴 修改这里：使用新的处理函数，而不是直接 setSidebarMode
+            onClick={handleSidebarModeChange}
+            style={{
+              color: "var(--text-color)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          />
+        </Tooltip>
       </div>
+
+      {/* 分割线 (仅在展开时显示，增加层次感) */}
       {collapsed && (
         <div
           style={{
-            height: 1,
-            background: "#f0f0f0",
-            margin: "8px 12px",
+            display: "flex",
+            justifyContent: "center",
+            marginBottom: 10,
             flexShrink: 0,
           }}
-        />
+        >
+          <Tooltip
+            title={sidebarMode === "tools" ? "切换到 AI" : "切换到工具箱"}
+            placement="right"
+          >
+            <Button
+              type={sidebarMode === "ai" ? "primary" : "text"}
+              shape="circle"
+              icon={
+                sidebarMode === "tools" ? (
+                  <AppstoreOutlined />
+                ) : (
+                  <RobotOutlined />
+                )
+              }
+              onClick={handleSidebarModeChange}
+            />
+          </Tooltip>
+        </div>
       )}
 
-      {/* 5. 工具箱区域 (独立滚动，占据剩余空间) */}
+      {/* 5. 双模态内容区域 (独立滚动，占据剩余空间) */}
       <div
         className="no-scrollbar"
         style={{
@@ -899,46 +1269,158 @@ const Sidebar: React.FC<SidebarProps> = ({
           overflowX: "hidden",
           scrollbarWidth: "none",
           msOverflowStyle: "none",
+          display: "flex",
+          flexDirection: "column",
         }}
       >
-        {renderNavItem(
-          "network-sniffer",
-          <GatewayOutlined />,
-          "一键抓包 (Mitmproxy)"
+        {/* === 模式 A: 工具列表 === */}
+        {sidebarMode === "tools" && (
+          <>
+            {renderNavItem(
+              "network-sniffer",
+              <GatewayOutlined />,
+              "一键抓包 (Mitmproxy)"
+            )}
+            {renderNavItem("script-lab", <ExperimentOutlined />, "脚本工坊")}
+            {renderNavItem("apk-builder", <BuildOutlined />, "APK 改包工坊")}
+            {renderNavItem(
+              "java-analyzer",
+              <CoffeeOutlined />,
+              "Java 源码分析"
+            )}
+            {renderNavItem("packer-lab", <ToolOutlined />, "壳工坊")}
+            {renderNavItem("algo-converter", <CodeOutlined />, "伪代码转译")}
+            {renderNavItem("web-lab", <CompassOutlined />, "Web 逆向实验室")}
+            {renderNavItem("asm-lab", <BugOutlined />, "ARM 汇编实验室")}
+          </>
         )}
-        {renderNavItem("script-lab", <ExperimentOutlined />, "脚本工坊")}
-        {renderNavItem("apk-builder", <BuildOutlined />, "APK 改包工坊")}
-        {renderNavItem("java-analyzer", <CoffeeOutlined />, "Java 源码分析")}
-        {renderNavItem("packer-lab", <ToolOutlined />, "壳工坊")}
-        {renderNavItem("algo-converter", <CodeOutlined />, "伪代码转译")}
-        {renderNavItem("web-lab", <CompassOutlined />, "Web 逆向实验室")}
-        {renderNavItem("asm-lab", <BugOutlined />, "ARM 汇编实验室")}
+
+        {/* === 模式 B: AI 智能体对话 === */}
+        {sidebarMode === "ai" && (
+          <div style={{ padding: collapsed ? "0 4px" : "0" }}>
+            {!collapsed && (
+              <div style={{ padding: "0 12px 12px 12px" }}>
+                <Button
+                  type="dashed"
+                  block
+                  icon={<PlusOutlined />}
+                  onClick={() => {
+                    handleNewChat();
+                  }}
+                >
+                  新建对话
+                </Button>
+              </div>
+            )}
+            {collapsed && (
+              <Tooltip title="新建对话" placement="right">
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "center",
+                    marginBottom: 8,
+                  }}
+                >
+                  <Button
+                    type="dashed"
+                    shape="circle"
+                    icon={<PlusOutlined />}
+                    onClick={() => message.info("新建对话")}
+                  />
+                </div>
+              </Tooltip>
+            )}
+
+            {/* 历史记录列表 */}
+            {!collapsed && (
+              <div
+                style={{
+                  padding: "0 16px 4px 16px",
+                  fontSize: 12,
+                  color: "#999",
+                }}
+              >
+                最近对话
+              </div>
+            )}
+            {chatList.map((session) => renderChatHistoryItem(session))}
+
+            {/* 更多示例内容填充 */}
+            <div style={{ height: 20 }}></div>
+          </div>
+        )}
 
         {/* 底部留白，避免内容贴到底部按钮上 */}
-        <div style={{ height: 30 }}></div>
+        <div style={{ height: 30, flexShrink: 0 }}></div>
       </div>
 
-      {/* 6. 底部折叠按钮 (固定) */}
+      {/* ==================== 6. 统一底部功能栏 (设置 + 折叠) ==================== */}
       <div
         style={{
-          flexShrink: 0, // 禁止被压缩
-          padding: "16px 0",
-          borderTop: "1px solid rgba(0,0,0,0.06)",
+          flexShrink: 0, // 禁止压缩
+          borderTop: "1px solid rgba(0,0,0,0.06)", // 只有这一条顶部分割线
+          padding: collapsed ? "16px 0" : "12px 16px", // 调整内边距
           display: "flex",
-          justifyContent: "center",
-          cursor: "pointer",
+          // 关键布局：折叠时竖排，展开时横排（两端对齐）
+          flexDirection: collapsed ? "column" : "row",
+          alignItems: "center",
+          justifyContent: collapsed ? "center" : "space-between",
+          gap: collapsed ? 24 : 0, // 折叠时让两个图标稍微拉开距离
           backgroundColor: "var(--bg-color, #fff)",
+          transition: "all 0.2s",
         }}
-        onClick={() => setCollapsed(!collapsed)}
       >
-        {collapsed ? (
-          <MenuUnfoldOutlined style={{ fontSize: 18, color: "#666" }} />
-        ) : (
-          <MenuFoldOutlined style={{ fontSize: 18, color: "#666" }} />
-        )}
+        {/* 左侧 (或上方): 设置按钮 */}
+        <Tooltip title="全局设置" placement="right">
+          <div
+            onClick={() => setIsSettingsOpen(true)}
+            style={{
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              color: "var(--text-color)",
+              transition: "color 0.2s",
+            }}
+            onMouseEnter={(e) =>
+              (e.currentTarget.style.color = token.colorPrimary)
+            }
+            onMouseLeave={(e) =>
+              (e.currentTarget.style.color = "var(--text-color)")
+            }
+          >
+            <SettingOutlined style={{ fontSize: 18 }} />
+            {/* {!collapsed && (
+              <span style={{ marginLeft: 10, fontSize: 14 }}>全局设置</span>
+            )} */}
+          </div>
+        </Tooltip>
+
+        {/* 右侧 (或下方): 折叠按钮 */}
+        <Tooltip title={collapsed ? "展开" : "折叠"} placement="right">
+          <div
+            onClick={() => setCollapsed(!collapsed)}
+            style={{
+              cursor: "pointer",
+              color: "#999",
+              display: "flex",
+              alignItems: "center",
+              transition: "color 0.2s",
+            }}
+            onMouseEnter={(e) =>
+              (e.currentTarget.style.color = token.colorPrimary)
+            }
+            onMouseLeave={(e) => (e.currentTarget.style.color = "#999")}
+          >
+            {collapsed ? (
+              <MenuUnfoldOutlined style={{ fontSize: 18 }} />
+            ) : (
+              <MenuFoldOutlined style={{ fontSize: 18 }} />
+            )}
+          </div>
+        </Tooltip>
       </div>
 
-      {/* Modals 保持不变 */}
+      {/* Modals */}
       <Modal
         title="连接云手机"
         open={isConnectModalOpen}
@@ -957,7 +1439,7 @@ const Sidebar: React.FC<SidebarProps> = ({
       <Modal
         title="重命名设备"
         open={isRenameModalOpen}
-        onOk={handleRenameSubmit}
+        onOk={handleAiRenameSubmit}
         onCancel={() => setIsRenameModalOpen(false)}
         okText="确定"
         cancelText="取消"
@@ -965,7 +1447,7 @@ const Sidebar: React.FC<SidebarProps> = ({
         <Input
           value={newDeviceName}
           onChange={(e) => setNewDeviceName(e.target.value)}
-          onPressEnter={handleRenameSubmit}
+          onPressEnter={handleAiRenameSubmit}
           autoFocus
         />
       </Modal>
@@ -981,6 +1463,7 @@ const Sidebar: React.FC<SidebarProps> = ({
         footer={null}
         width={480}
       >
+        {/* ... (Tools List Content) ... */}
         <List
           itemLayout="horizontal"
           dataSource={toolsList}
@@ -1118,6 +1601,598 @@ const Sidebar: React.FC<SidebarProps> = ({
               </div>
             );
           }}
+        />
+      </Modal>
+      <Modal
+        title="添加模型服务商"
+        open={isAddModelModalOpen}
+        onCancel={() => setIsAddModelModalOpen(false)}
+        onOk={() => {
+          // ✅ 修改：提交表单并获取数据
+          addModelForm
+            .validateFields()
+            .then((values) => {
+              // values 包含表单字段：{ name, baseUrl, modelId }
+
+              // 1. 构造新的选项对象
+              const newProvider = {
+                value: values.name, // 或者生成一个唯一ID
+                label: values.name,
+              };
+
+              // 2. 更新状态：将新选项追加到列表末尾
+              setProviders([...providers, newProvider]);
+
+              // 3. 重置表单并关闭弹窗
+              addModelForm.resetFields();
+              setIsAddModelModalOpen(false);
+              message.success(`成功添加服务商: ${values.name}`);
+            })
+            .catch((info) => {
+              console.log("Validate Failed:", info);
+            });
+        }}
+        okText="保存"
+        cancelText="取消"
+        width={480}
+      >
+        <Form form={addModelForm} layout="vertical" style={{ marginTop: 20 }}>
+          <Form.Item
+            label="服务商名称"
+            name="name"
+            rules={[{ required: true, message: "请输入服务商名称" }]}
+            tooltip="显示在下拉列表中的名称"
+          >
+            <Input placeholder="例如: Moonshot (Kimi), 通义千问" autoFocus />
+          </Form.Item>
+
+          <Form.Item
+            label="API Base URL"
+            name="baseUrl"
+            rules={[{ required: true, message: "请输入 API 地址" }]}
+            tooltip="OpenAI 格式的接口地址"
+          >
+            <Input placeholder="https://api.moonshot.cn/v1" />
+          </Form.Item>
+
+          <Form.Item
+            label="默认模型 ID"
+            name="modelId"
+            tooltip="该服务商的主力模型名称"
+          >
+            <Input placeholder="例如: moonshot-v1-8k" />
+          </Form.Item>
+
+          <div
+            style={{
+              fontSize: 12,
+              color: "#999",
+              backgroundColor: "#f5f5f5",
+              padding: 10,
+              borderRadius: 6,
+            }}
+          >
+            <InfoCircleOutlined style={{ marginRight: 6 }} />
+            目前仅支持兼容 <strong>OpenAI 接口格式</strong> 的服务商。
+          </div>
+        </Form>
+      </Modal>
+      <Modal
+        open={isSettingsOpen}
+        onCancel={() => setIsSettingsOpen(false)}
+        footer={null}
+        width={720} // 加宽一点，适合左右布局
+        centered
+        styles={{ body: { padding: 0 } }} // 移除默认 padding，自己控制布局
+        closeIcon={null} // 隐藏默认关闭按钮，我们自己画或者不需要
+      >
+        <div
+          style={{
+            display: "flex",
+            height: "500px",
+            borderRadius: 8,
+            overflow: "hidden",
+          }}
+        >
+          {/* === 左侧：导航栏 === */}
+          <div
+            style={{
+              width: 200,
+              backgroundColor: "#f5f5f5",
+              borderRight: "1px solid #e8e8e8",
+              padding: "20px 0",
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            <div
+              style={{
+                padding: "0 20px 20px",
+                fontWeight: 600,
+                fontSize: 18,
+                color: "#333",
+              }}
+            >
+              设置
+            </div>
+
+            {[
+              { key: "general", icon: <LaptopOutlined />, label: "通用设置" },
+              { key: "env", icon: <ApiOutlined />, label: "逆向环境" },
+              { key: "tools", icon: <ToolOutlined />, label: "工具配置" },
+              { key: "ai", icon: <RobotOutlined />, label: "AI配置" },
+              { key: "about", icon: <InfoCircleOutlined />, label: "关于" },
+            ].map((item) => (
+              <div
+                key={item.key}
+                onClick={() => setActiveSettingTab(item.key as SettingTab)}
+                style={{
+                  padding: "10px 24px",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  fontSize: 14,
+                  backgroundColor:
+                    activeSettingTab === item.key ? "#fff" : "transparent",
+                  color:
+                    activeSettingTab === item.key ? token.colorPrimary : "#666",
+                  borderLeft:
+                    activeSettingTab === item.key
+                      ? `3px solid ${token.colorPrimary}`
+                      : "3px solid transparent",
+                  transition: "all 0.2s",
+                }}
+              >
+                {item.icon}
+                <span>{item.label}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* === 右侧：内容区域 === */}
+          <div
+            style={{
+              flex: 1,
+              padding: "24px 32px",
+              overflowY: "auto",
+              backgroundColor: "#fff",
+            }}
+          >
+            {/* 1. 通用设置 */}
+            {activeSettingTab === "general" && (
+              <div>
+                <h3 style={{ marginBottom: 24 }}>通用设置</h3>
+
+                <div style={{ marginBottom: 24 }}>
+                  <div style={{ fontWeight: 500, marginBottom: 8 }}>
+                    主题偏好
+                  </div>
+                  <div style={{ display: "flex", gap: 16 }}>
+                    {/* 模拟的主题选择卡片 */}
+                    {["Light", "Dark", "Auto"].map((themeName) => (
+                      <div
+                        key={themeName}
+                        style={{
+                          border:
+                            themeName === "Light"
+                              ? `2px solid ${token.colorPrimary}`
+                              : "1px solid #d9d9d9",
+                          borderRadius: 8,
+                          padding: "12px 24px",
+                          cursor: "pointer",
+                          textAlign: "center",
+                          minWidth: 80,
+                          backgroundColor:
+                            themeName === "Light" ? "#e6f7ff" : "#fff",
+                        }}
+                      >
+                        <BgColorsOutlined
+                          style={{
+                            fontSize: 20,
+                            marginBottom: 8,
+                            display: "block",
+                          }}
+                        />
+                        <span style={{ fontSize: 13 }}>
+                          {themeName === "Light"
+                            ? "明亮"
+                            : themeName === "Dark"
+                            ? "暗黑"
+                            : "跟随系统"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <Divider />
+
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    marginBottom: 20,
+                  }}
+                >
+                  <div>
+                    <div style={{ fontWeight: 500 }}>自动连接设备</div>
+                    <div style={{ fontSize: 12, color: "#999" }}>
+                      启动时自动尝试连接上次使用的设备
+                    </div>
+                  </div>
+                  <Switch defaultChecked />
+                </div>
+
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                  }}
+                >
+                  <div>
+                    <div style={{ fontWeight: 500 }}>硬件加速</div>
+                    <div style={{ fontSize: 12, color: "#999" }}>
+                      使用 GPU 渲染界面 (可能增加内存占用)
+                    </div>
+                  </div>
+                  <Switch defaultChecked />
+                </div>
+              </div>
+            )}
+
+            {/* 2. 环境配置 */}
+            {activeSettingTab === "env" && (
+              <div>
+                <h3 style={{ marginBottom: 24 }}>环境配置</h3>
+
+                <Form layout="vertical">
+                  <Form.Item
+                    label={
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          width: "100%",
+                        }}
+                      >
+                        <div>
+                          <span>ADB 路径</span>
+                          <span
+                            style={{
+                              color: "#52c41a",
+                              fontSize: 12,
+                              marginLeft: 10,
+                            }}
+                          >
+                            <CheckCircleFilled /> 检测正常
+                          </span>
+                        </div>
+                      </div>
+                    }
+                  >
+                    <Input
+                      defaultValue="/Users/dev/platform-tools/adb"
+                      addonAfter={
+                        <FolderOpenOutlined style={{ cursor: "pointer" }} />
+                      }
+                    />
+                    <div style={{ fontSize: 12, color: "#999", marginTop: 4 }}>
+                      用于连接安卓设备，留空则使用内置 ADB
+                    </div>
+                  </Form.Item>
+
+                  <Form.Item label="Java 路径 (JDK)">
+                    <Input
+                      placeholder="未配置"
+                      addonAfter={
+                        <FolderOpenOutlined style={{ cursor: "pointer" }} />
+                      }
+                      status="warning"
+                    />
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: "#faad14",
+                        marginTop: 4,
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 4,
+                      }}
+                    >
+                      未检测到有效 JDK，Java 源码分析功能将受限
+                    </div>
+                  </Form.Item>
+
+                  <Form.Item label="Python 解释器">
+                    <Select defaultValue="system">
+                      <Select.Option value="system">
+                        系统默认 (/usr/bin/python3)
+                      </Select.Option>
+                      <Select.Option value="conda">
+                        Conda Environment (base)
+                      </Select.Option>
+                      <Select.Option value="custom">自定义...</Select.Option>
+                    </Select>
+                  </Form.Item>
+                </Form>
+              </div>
+            )}
+
+            {/* 3. 工具配置 */}
+            {activeSettingTab === "tools" && (
+              <div>
+                <h3 style={{ marginBottom: 24 }}>工具配置</h3>
+                <Form layout="vertical">
+                  <Form.Item label="Frida Server 默认版本">
+                    <Select defaultValue="16.2.1">
+                      <Select.Option value="16.2.1">
+                        16.2.1 (Stable) - 推荐
+                      </Select.Option>
+                      <Select.Option value="16.1.4">16.1.4</Select.Option>
+                      <Select.Option value="15.2.2">
+                        15.2.2 (Legacy)
+                      </Select.Option>
+                    </Select>
+                    <div style={{ fontSize: 12, color: "#999", marginTop: 4 }}>
+                      向设备部署 Frida 时默认选中的版本
+                    </div>
+                  </Form.Item>
+
+                  <Form.Item label="反编译引擎">
+                    <Radio.Group defaultValue="jadx">
+                      <Radio value="jadx">JADX (速度快)</Radio>
+                      <Radio value="fernflower">Fernflower (IDEA 内置)</Radio>
+                    </Radio.Group>
+                  </Form.Item>
+                </Form>
+              </div>
+            )}
+
+            {/* ai配置 */}
+            {activeSettingTab === "ai" && (
+              <div>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    marginBottom: 24,
+                  }}
+                >
+                  <h3 style={{ margin: 0 }}>AI 模型管理</h3>
+                  <Button
+                    type="primary"
+                    icon={<PlusOutlined />}
+                    onClick={() => handleOpenAiConfig(null)}
+                  >
+                    添加模型
+                  </Button>
+                </div>
+
+                {/* 核心表格 */}
+                <Table
+                  dataSource={aiConfigs}
+                  rowKey="id"
+                  pagination={false}
+                  size="small"
+                  columns={[
+                    {
+                      title: "状态",
+                      key: "isActive",
+                      width: 80,
+                      render: (_, record) => (
+                        <div
+                          style={{ cursor: "pointer", textAlign: "center" }}
+                          onClick={() => handleSetActive(record.id!)}
+                        >
+                          {record.isActive ? (
+                            <Tag color="success" icon={<CheckCircleFilled />}>
+                              使用中
+                            </Tag>
+                          ) : (
+                            <Tag color="default">备用</Tag>
+                          )}
+                        </div>
+                      ),
+                    },
+                    {
+                      title: "名称",
+                      dataIndex: "name",
+                      key: "name",
+                      render: (text) => <strong>{text}</strong>,
+                    },
+                    {
+                      title: "服务商",
+                      dataIndex: "provider",
+                      key: "provider",
+                      render: (text) => {
+                        const colors: Record<string, string> = {
+                          openai: "green",
+                          deepseek: "blue",
+                          anthropic: "purple",
+                          custom: "orange",
+                        };
+                        return (
+                          <Tag color={colors[text] || "default"}>
+                            {text.toUpperCase()}
+                          </Tag>
+                        );
+                      },
+                    },
+                    {
+                      title: "模型ID",
+                      dataIndex: "modelId",
+                      key: "modelId",
+                      render: (text) => (
+                        <span style={{ color: "#999", fontSize: 12 }}>
+                          {text}
+                        </span>
+                      ),
+                    },
+                    {
+                      title: "操作",
+                      key: "action",
+                      render: (_, record) => (
+                        <Space size="small">
+                          <Button
+                            type="text"
+                            size="small"
+                            icon={<EditOutlined />}
+                            onClick={() => handleOpenAiConfig(record)}
+                          />
+                          <Popconfirm
+                            title="确定删除吗？"
+                            onConfirm={() => handleDeleteAiConfig(record.id!)}
+                            okText="是"
+                            cancelText="否"
+                          >
+                            <Button
+                              type="text"
+                              danger
+                              size="small"
+                              icon={<DeleteOutlined />}
+                              disabled={record.isActive} // 正在使用的不能删
+                            />
+                          </Popconfirm>
+                        </Space>
+                      ),
+                    },
+                  ]}
+                />
+
+                <div
+                  style={{
+                    marginTop: 24,
+                    padding: 16,
+                    backgroundColor: "#f9f9f9",
+                    borderRadius: 8,
+                  }}
+                >
+                  <div
+                    style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}
+                  >
+                    全局提示词 (System Prompt)
+                  </div>
+                  <Input.TextArea
+                    rows={3}
+                    placeholder="设置全局的系统提示词，对所有模型生效..."
+                    defaultValue="你是一个精通 Android 逆向工程的安全专家。"
+                    style={{ resize: "none", backgroundColor: "#fff" }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* 4. 关于 */}
+            {activeSettingTab === "about" && (
+              <div style={{ textAlign: "center", padding: "40px 0" }}>
+                <Avatar
+                  size={64}
+                  icon={<ThunderboltFilled />}
+                  style={{
+                    backgroundColor: token.colorPrimary,
+                    marginBottom: 16,
+                  }}
+                />
+                <h2 style={{ marginBottom: 8 }}>逆向工作台</h2>
+                <p style={{ color: "#999", marginBottom: 24 }}>
+                  Version 1.0.0 (Beta)
+                </p>
+                <div
+                  style={{ display: "flex", gap: 12, justifyContent: "center" }}
+                >
+                  <Button>检查更新</Button>
+                  <Button
+                    type="primary"
+                    href="https://github.com"
+                    target="_blank"
+                  >
+                    GitHub
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </Modal>
+      {/* ==================== ✅ 新增：AI 配置 添加/编辑 弹窗 ==================== */}
+      <Modal
+        title={editingConfig ? "编辑模型配置" : "添加新模型"}
+        open={isAiConfigModalOpen}
+        onOk={handleSaveAiConfig}
+        onCancel={() => setIsAiConfigModalOpen(false)}
+        width={500}
+        okText="保存"
+        cancelText="取消"
+        destroyOnClose
+      >
+        <Form form={aiConfigForm} layout="vertical" style={{ marginTop: 20 }}>
+          <Form.Item
+            label="配置名称 (Alias)"
+            name="name"
+            rules={[{ required: true, message: "起个名字吧，比如: 公司GPT" }]}
+          >
+            <Input placeholder="例如: 我的 DeepSeek, 公司 GPT-4" />
+          </Form.Item>
+
+          <div style={{ display: "flex", gap: 16 }}>
+            <Form.Item label="服务商" name="provider" style={{ flex: 1 }}>
+              <Select>
+                <Select.Option value="openai">OpenAI</Select.Option>
+                <Select.Option value="deepseek">DeepSeek</Select.Option>
+                <Select.Option value="anthropic">Anthropic</Select.Option>
+                <Select.Option value="custom">Custom / Local</Select.Option>
+              </Select>
+            </Form.Item>
+            <Form.Item
+              label="模型 ID"
+              name="modelId"
+              style={{ flex: 1 }}
+              rules={[{ required: true, message: "请输入模型ID" }]}
+            >
+              <Input placeholder="例如: gpt-4o, deepseek-chat" />
+            </Form.Item>
+          </div>
+
+          <Form.Item
+            label="API Key"
+            name="apiKey"
+            rules={[{ required: true, message: "请输入 API Key" }]}
+          >
+            <Input.Password placeholder="sk-..." />
+          </Form.Item>
+
+          <Form.Item
+            label="API 代理地址 (Base URL)"
+            name="baseUrl"
+            rules={[{ required: true, message: "请输入 Base URL" }]}
+          >
+            <Input placeholder="https://api.openai.com/v1" />
+          </Form.Item>
+        </Form>
+      </Modal>
+      <Modal
+        title="重命名对话"
+        open={isAiRenameModalOpen}
+        onOk={handleRenameSubmit}
+        onCancel={() => setIsAiRenameModalOpen(false)}
+        okText="保存"
+        cancelText="取消"
+        width={400}
+        // 建议加上 destroyOnClose，确保每次打开都重新渲染 Input，触发 autoFocus
+        destroyOnClose
+      >
+        <Input
+          value={newTitle}
+          onChange={(e) => setNewTitle(e.target.value)}
+          onPressEnter={handleRenameSubmit}
+          // 1. 自动获取焦点
+          autoFocus
+          // 2. 核心修改：当获得焦点时，执行全选操作
+          onFocus={(e) => e.target.select()}
         />
       </Modal>
     </div>

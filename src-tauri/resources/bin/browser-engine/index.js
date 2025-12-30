@@ -4,6 +4,7 @@ const readline = require("readline");
 const { injectHooks } = require("./hooks");
 const { startRpcServer, stopRpcServer, updatePage } = require("./rpc_server");
 const inspectorScript = require("./hooks/inspector_inject");
+const { deobfuscate } = require("./ast_transform");
 
 chromium.use(stealthPlugin());
 
@@ -59,6 +60,13 @@ const handlers = {
     const browserType = config.browserType || "firefox";
     const activeHooks = config.hooks || [];
     const interceptRules = config.intercepts || [];
+    const customScripts = config.customScripts || [];
+
+    // 🔥🔥🔥 分离不同时机的脚本 🔥🔥🔥
+    const startScripts = customScripts.filter(
+      (s) => !s.timing || s.timing === "start"
+    );
+    const loadScripts = customScripts.filter((s) => s.timing === "load");
 
     if (!activeHooks.includes("rpc_inject")) {
       activeHooks.push("rpc_inject");
@@ -153,6 +161,29 @@ const handlers = {
               body: rule.payload,
             });
           }
+          if (rule.action === "AST_Transform") {
+            try {
+              const response = await route.fetch();
+              const originalBody = await response.text();
+              sendEvent("console", `[AST] 正在还原 ${request.url()} ...`);
+              const cleanCode = deobfuscate(originalBody);
+              sendEvent("console", `[AST] 还原成功: ${request.url()}`);
+              return route.fulfill({
+                response,
+                body: cleanCode,
+                headers: {
+                  ...response.headers(),
+                  "content-length": String(Buffer.byteLength(cleanCode)),
+                },
+              });
+            } catch (e) {
+              sendEvent(
+                "error",
+                `[AST] 还原失败: ${request.url()} - ${e.message}`
+              );
+              return route.continue();
+            }
+          }
           return route.continue();
         });
       }
@@ -167,20 +198,37 @@ const handlers = {
 
       await injectHooks(page, activeHooks);
 
-      // ============================================
-      // 🔥🔥🔥 注入用户自定义脚本 (Script Manager) 🔥🔥🔥
-      // ============================================
-      const customScripts = config.customScripts || [];
-      for (const scriptCode of customScripts) {
+      // 🔥🔥🔥 注入 Start 时机的脚本 (Pre-load) 🔥🔥🔥
+      for (const scriptObj of startScripts) {
         try {
-          // 使用 content 属性注入纯字符串代码
-          await page.addInitScript({ content: scriptCode });
+          // 兼容旧格式(字符串)和新格式(对象)
+          const codeContent =
+            typeof scriptObj === "string" ? scriptObj : scriptObj.code;
+          await page.addInitScript({ content: codeContent });
         } catch (e) {
-          sendEvent("error", `自定义脚本注入失败: ${e.message}`);
+          sendEvent("error", `Pre-load Script Error: ${e.message}`);
         }
       }
 
+      // 导航页面
       await page.goto(config.url, { timeout: 30000 });
+
+      // 🔥🔥🔥 注入 Load 时机的脚本 (Post-load) 🔥🔥🔥
+      // 此时页面已加载完成 (Playwright 的 goto 默认等待 load 事件)
+      if (loadScripts.length > 0) {
+        sendEvent(
+          "console",
+          `[Script] 正在执行 ${loadScripts.length} 个加载后脚本...`
+        );
+        for (const scriptObj of loadScripts) {
+          try {
+            await page.evaluate(scriptObj.code);
+            sendEvent("console", `[Script] 加载后脚本执行成功`);
+          } catch (e) {
+            sendEvent("error", `Post-load Script Error: ${e.message}`);
+          }
+        }
+      }
 
       sendEvent("status", `Browser Launched (${browserType})`);
     } catch (e) {
@@ -219,7 +267,6 @@ const handlers = {
     }
   },
 
-  // 🔥🔥🔥 新增：元素截图 (用于 AI 识别) 🔥🔥🔥
   async screenshot_element(data) {
     if (!page || !isBrowserActive) {
       sendEvent("error", "Browser not active");
@@ -236,6 +283,21 @@ const handlers = {
       });
     } catch (e) {
       sendEvent("error", `Screenshot Failed: ${e.message}`);
+    }
+  },
+
+  async ast_deobfuscate(data) {
+    const sourceCode = data.code;
+    if (!sourceCode) return;
+    sendEvent("console", "[AST] 正在解析并还原代码...");
+    try {
+      const startTime = Date.now();
+      const resultCode = deobfuscate(sourceCode);
+      const cost = Date.now() - startTime;
+      sendEvent("ast_result", { code: resultCode, cost: cost });
+      sendEvent("console", `[AST] 还原成功 (耗时 ${cost}ms)`);
+    } catch (e) {
+      sendEvent("error", `AST Error: ${e.message}`);
     }
   },
 

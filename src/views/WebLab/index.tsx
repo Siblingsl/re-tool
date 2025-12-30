@@ -15,7 +15,12 @@ import {
   InputNumber,
   List,
   Modal,
+  Spin,
+  Segmented,
+  Dropdown,
+  MenuProps,
   Tag,
+  Radio, // 🔥 新增组件
 } from "antd";
 import {
   BugOutlined,
@@ -35,7 +40,15 @@ import {
   RobotOutlined,
   EditOutlined,
   FileAddOutlined,
-  UserAddOutlined,
+  ToolOutlined,
+  ArrowRightOutlined,
+  DownOutlined,
+  ExperimentOutlined,
+  ClockCircleOutlined,
+  QuestionCircleOutlined,
+  ClusterOutlined,
+  DeploymentUnitOutlined,
+  ChromeOutlined, // 🔥 新增图标
 } from "@ant-design/icons";
 import Editor from "@monaco-editor/react";
 import { invoke } from "@tauri-apps/api/core";
@@ -51,16 +64,17 @@ interface InterceptRule {
   enabled: boolean;
   urlPattern: string;
   resourceType: string;
-  action: "Abort" | "MockBody" | "MockFile";
+  action: "Abort" | "MockBody" | "AST_Transform";
   payload: string;
 }
 
-// 🔥🔥🔥 新增：自定义脚本接口 🔥🔥🔥
+// 🔥🔥🔥 更新：增加 timing 字段 🔥🔥🔥
 interface CustomScript {
   id: string;
   name: string;
   code: string;
   enabled: boolean;
+  timing: "start" | "load"; // start=加载前, load=加载后
 }
 
 const WebLab: React.FC = () => {
@@ -87,34 +101,29 @@ const WebLab: React.FC = () => {
     payload: "",
   });
 
-  // 🔥🔥🔥 新增：自定义脚本状态 🔥🔥🔥
   const [customScripts, setCustomScripts] = useState<CustomScript[]>([]);
   const [isScriptModalOpen, setIsScriptModalOpen] = useState(false);
+  // 🔥🔥🔥 更新默认值 🔥🔥🔥
   const [currentScript, setCurrentScript] = useState<CustomScript>({
     id: "",
     name: "New Script",
-    code: '// 在此编写要在页面加载前注入的 JS 代码\nconsole.log("Custom script loaded!");',
+    code: "",
     enabled: true,
+    timing: "start",
   });
 
   const [engineStatus, setEngineStatus] = useState("Stopped");
-  const [activeTab, setActiveTab] = useState("code");
+  const [activeTab, setActiveTab] = useState<string | number>("code");
   const [code, setCode] = useState(
-    `/**
- * ✨ Playwright 自动化脚本编辑器
- * * 👁️ 点击 "拾取元素" 生成点击代码
- * * 🤖 点击 "AI 验证码" 自动识别图片验证码
- */
-
-try {
-  console.log(">>> 开始执行...");
-  const title = await page.title();
-  console.log(\`页面标题: \${title}\`);
-  return "Success";
-} catch (err) {
-  console.error(err.message);
-}`
+    `/**\n * ✨ Playwright 自动化脚本编辑器\n */\n\ntry {\n  console.log(">>> 开始执行...");\n  const title = await page.title();\n  console.log(\`页面标题: \${title}\`);\n  return "Success";\n} catch (err) {\n  console.error(err.message);\n}`
   );
+
+  const [isAstModalOpen, setIsAstModalOpen] = useState(false);
+  const [astSource, setAstSource] = useState(
+    "// 在此粘贴混淆代码\nvar _0x5a2b = ['\\x68\\x65\\x6c\\x6c\\x6f', 'world'];\nconsole['log'](_0x5a2b[0] + ' ' + _0x5a2b[1]);"
+  );
+  const [astResult, setAstResult] = useState("");
+  const [astLoading, setAstLoading] = useState(false);
 
   const isManuallyStopping = useRef(false);
   const isPickingCaptcha = useRef(false);
@@ -125,20 +134,30 @@ try {
     engineStatus.includes("Running") ||
     engineStatus.includes("Launched");
 
-  // 初始化：从 LocalStorage 加载脚本
   useEffect(() => {
     const savedScripts = localStorage.getItem("weblab_custom_scripts");
     if (savedScripts) {
       try {
-        setCustomScripts(JSON.parse(savedScripts));
+        // 兼容旧数据，如果没有 timing 默认为 start
+        const parsed = JSON.parse(savedScripts).map((s: any) => ({
+          ...s,
+          timing: s.timing || "start",
+        }));
+        setCustomScripts(parsed);
       } catch (e) {}
     }
   }, []);
 
-  // 监听后端事件
   useEffect(() => {
     const unlisten = listen("weblab-event", (event: any) => {
       const { type, payload } = event.payload;
+
+      if (type === "ast_result") {
+        setAstResult(payload.code);
+        setAstLoading(false);
+        message.success(`还原完成，耗时 ${payload.cost}ms`);
+        return;
+      }
 
       if (type === "inspector_picked") {
         const selector = payload;
@@ -189,6 +208,7 @@ try {
           isManuallyStopping.current = false;
         }
         setAiLoading(false);
+        setAstLoading(false);
         const time = new Date().toLocaleTimeString();
         setLogs((prev) => prev + `\n[${time}] [ERROR] ${payload}`);
         return;
@@ -255,10 +275,13 @@ try {
             headless: config.headless,
             hooks: config.hooks,
             intercepts: interceptRules.filter((r) => r.enabled),
-            // 🔥🔥🔥 传递自定义脚本 🔥🔥🔥
+            // 🔥🔥🔥 升级：传递包含 timing 的完整对象，而不仅仅是 code 字符串 🔥🔥🔥
             customScripts: customScripts
               .filter((s) => s.enabled)
-              .map((s) => s.code),
+              .map((s) => ({
+                code: s.code,
+                timing: s.timing || "start",
+              })),
           },
         });
         message.success("启动指令已发送");
@@ -304,7 +327,27 @@ try {
     setActiveTab("console");
   };
 
-  // 拦截规则 CRUD
+  const runAstDeobfuscate = async () => {
+    if (!astSource.trim()) {
+      message.warning("请先输入需要还原的代码");
+      return;
+    }
+    setAstLoading(true);
+    try {
+      if (engineStatus === "Stopped") {
+        await invoke("start_web_engine");
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      await invoke("send_web_command", {
+        action: "ast_deobfuscate",
+        data: { code: astSource },
+      });
+    } catch (e) {
+      message.error("AST 引擎调用失败: " + e);
+      setAstLoading(false);
+    }
+  };
+
   const addRule = () => {
     setCurrentRule({
       id: Date.now().toString(),
@@ -332,13 +375,13 @@ try {
     setInterceptRules((prev) => prev.filter((r) => r.id !== id));
   };
 
-  // 🔥🔥🔥 自定义脚本 CRUD 🔥🔥🔥
   const addScript = () => {
     setCurrentScript({
       id: Date.now().toString(),
       name: `Script ${customScripts.length + 1}`,
-      code: '// 在此输入代码，将在页面加载前(document-start)执行\n// 例如: window.myVar = 123;\nconsole.log("My Custom Script Injected!");',
+      code: '// 在此输入代码...\nconsole.log("Custom script injected!");',
       enabled: true,
+      timing: "start",
     });
     setIsScriptModalOpen(true);
   };
@@ -373,7 +416,6 @@ try {
     await invoke("send_web_command", { action: "toggle_inspector", data: {} });
     message.loading("已进入拾取模式，请点击元素...", 1);
   };
-
   const startCaptchaInspector = async () => {
     if (!isRunning) {
       message.warning("请先启动浏览器");
@@ -384,8 +426,33 @@ try {
     message.loading("请点击【验证码图片】进行识别...", 2);
   };
 
+  const toolMenuItems: MenuProps["items"] = [
+    {
+      key: "inspector",
+      label: "拾取网页元素",
+      icon: <EyeOutlined />,
+      disabled: !isRunning || aiLoading,
+      onClick: startInspector,
+    },
+    {
+      key: "captcha",
+      label: aiLoading ? "AI 识别中..." : "AI 验证码识别",
+      icon: aiLoading ? <Spin size="small" /> : <RobotOutlined />,
+      disabled: !isRunning,
+      onClick: startCaptchaInspector,
+    },
+    { type: "divider" },
+    {
+      key: "ast",
+      label: "AST 混淆还原",
+      icon: <ToolOutlined />,
+      onClick: () => setIsAstModalOpen(true),
+    },
+  ];
+
   const ConfigPanel = () => (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* 状态栏 */}
       <div
         style={{
           padding: "12px",
@@ -415,7 +482,7 @@ try {
         />
       </div>
 
-      <Collapse defaultActiveKey={["hooks"]} ghost size="small">
+      <Collapse defaultActiveKey={["scripts"]} ghost size="small">
         <Panel
           header={
             <span>
@@ -432,12 +499,13 @@ try {
                 justifyContent: "space-between",
               }}
             >
-              <Text>端口 (WS)</Text>
+              {" "}
+              <Text>端口 (WS)</Text>{" "}
               <InputNumber
                 value={rpcPort}
                 onChange={(v) => setRpcPort(v || 9999)}
                 disabled={rpcRunning}
-              />
+              />{" "}
             </div>
             <Button
               type={rpcRunning ? "default" : "primary"}
@@ -447,7 +515,8 @@ try {
               block
               disabled={!isRunning}
             >
-              {rpcRunning ? "关闭 RPC 服务" : "开启 RPC 服务"}
+              {" "}
+              {rpcRunning ? "关闭 RPC 服务" : "开启 RPC 服务"}{" "}
             </Button>
             {rpcRunning && (
               <div
@@ -464,7 +533,14 @@ try {
             )}
           </div>
         </Panel>
-
+        <Panel
+          header={
+            <span>
+              <ChromeOutlined /> CDP 协议注入
+            </span>
+          }
+          key="cdp"
+        ></Panel>
         <Panel
           header={
             <span>
@@ -500,93 +576,6 @@ try {
             </div>
           </div>
         </Panel>
-
-        <Panel
-          header={
-            <span>
-              <BugOutlined /> 注入 Hook
-            </span>
-          }
-          key="hooks"
-        >
-          <Checkbox.Group
-            style={{ display: "flex", flexDirection: "column", gap: 8 }}
-            options={[
-              { label: "RPC 注入 (必需)", value: "rpc_inject", disabled: true },
-              { label: "JSON.parse 监控", value: "json_hook" },
-              { label: "XHR/Fetch 监控", value: "network_hook" },
-              { label: "Cookie 变化监控", value: "cookie_hook" },
-              { label: "Debugger 绕过", value: "anti_debug" },
-            ]}
-            value={config.hooks}
-            onChange={(v) => setConfig({ ...config, hooks: v as string[] })}
-          />
-        </Panel>
-
-        {/* 🔥🔥🔥 新增：自定义脚本工坊 🔥🔥🔥 */}
-        <Panel
-          header={
-            <span>
-              <UserAddOutlined /> 我的脚本工坊
-            </span>
-          }
-          key="scripts"
-        >
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <Button
-              type="dashed"
-              icon={<FileAddOutlined />}
-              block
-              onClick={addScript}
-            >
-              新建脚本
-            </Button>
-            <List
-              size="small"
-              dataSource={customScripts}
-              renderItem={(item) => (
-                <List.Item
-                  actions={[
-                    <EditOutlined
-                      onClick={() => editScript(item)}
-                      style={{ color: "#1890ff" }}
-                    />,
-                    <DeleteOutlined
-                      onClick={() => deleteScript(item.id)}
-                      style={{ color: "#ff4d4f" }}
-                    />,
-                    <Switch
-                      size="small"
-                      checked={item.enabled}
-                      onChange={(v) => {
-                        const newScripts = customScripts.map((s) =>
-                          s.id === item.id ? { ...s, enabled: v } : s
-                        );
-                        setCustomScripts(newScripts);
-                        localStorage.setItem(
-                          "weblab_custom_scripts",
-                          JSON.stringify(newScripts)
-                        );
-                      }}
-                    />,
-                  ]}
-                >
-                  <div style={{ width: "100%", overflow: "hidden" }}>
-                    <div style={{ fontWeight: 500, fontSize: 13 }}>
-                      {item.name}
-                    </div>
-                    <div style={{ fontSize: 10, color: "#999" }}>
-                      {item.code.length > 30
-                        ? item.code.substring(0, 30) + "..."
-                        : item.code}
-                    </div>
-                  </div>
-                </List.Item>
-              )}
-            />
-          </div>
-        </Panel>
-
         <Panel
           header={
             <span>
@@ -626,14 +615,105 @@ try {
                     />,
                   ]}
                 >
+                  {" "}
                   <div style={{ width: "100%", overflow: "hidden" }}>
                     <div style={{ fontWeight: 500, fontSize: 13 }}>
                       {item.urlPattern}
                     </div>
                     <div style={{ fontSize: 12, color: "#999" }}>
-                      {item.action} • {item.resourceType}
+                      {" "}
+                      {item.action === "AST_Transform" ? (
+                        <Tag color="geekblue">AST 还原</Tag>
+                      ) : (
+                        item.action
+                      )}{" "}
+                      • {item.resourceType}{" "}
                     </div>
-                  </div>
+                  </div>{" "}
+                </List.Item>
+              )}
+            />
+          </div>
+        </Panel>
+        <Panel
+          header={
+            <span>
+              <BugOutlined /> 注入 Hook
+            </span>
+          }
+          key="hooks"
+        >
+          <Checkbox.Group
+            style={{ display: "flex", flexDirection: "column", gap: 8 }}
+            options={[
+              { label: "RPC 注入 (必需)", value: "rpc_inject", disabled: true },
+              { label: "JSON.parse 监控", value: "json_hook" },
+              { label: "XHR/Fetch 监控", value: "network_hook" },
+              { label: "Cookie 变化监控", value: "cookie_hook" },
+              { label: "Debugger 绕过", value: "anti_debug" },
+            ]}
+            value={config.hooks}
+            onChange={(v) => setConfig({ ...config, hooks: v as string[] })}
+          />
+        </Panel>
+        <Panel header={<span>我的脚本工坊</span>} key="scripts">
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <Button
+              type="dashed"
+              icon={<FileAddOutlined />}
+              block
+              onClick={addScript}
+            >
+              新建脚本
+            </Button>
+            <List
+              size="small"
+              dataSource={customScripts}
+              renderItem={(item) => (
+                <List.Item
+                  actions={[
+                    <EditOutlined
+                      onClick={() => editScript(item)}
+                      style={{ color: "#1890ff" }}
+                    />,
+                    <DeleteOutlined
+                      onClick={() => deleteScript(item.id)}
+                      style={{ color: "#ff4d4f" }}
+                    />,
+                    <Switch
+                      size="small"
+                      checked={item.enabled}
+                      onChange={(v) => {
+                        const newScripts = customScripts.map((s) =>
+                          s.id === item.id ? { ...s, enabled: v } : s
+                        );
+                        setCustomScripts(newScripts);
+                        localStorage.setItem(
+                          "weblab_custom_scripts",
+                          JSON.stringify(newScripts)
+                        );
+                      }}
+                    />,
+                  ]}
+                >
+                  {" "}
+                  <div style={{ width: "100%", overflow: "hidden" }}>
+                    {" "}
+                    <div style={{ fontWeight: 500, fontSize: 13 }}>
+                      {item.name}
+                    </div>
+                    <div style={{ fontSize: 10, color: "#999" }}>
+                      <Tag
+                        color={item.timing === "load" ? "green" : "blue"}
+                        style={{ marginRight: 5, transform: "scale(0.8)" }}
+                      >
+                        {item.timing === "load" ? "Load后" : "加载前"}
+                      </Tag>
+                      {item.code.length > 20
+                        ? item.code.substring(0, 20) + "..."
+                        : item.code}
+                    </div>{" "}
+                  </div>{" "}
                 </List.Item>
               )}
             />
@@ -689,6 +769,7 @@ try {
           overflow: "hidden",
         }}
       >
+        {/* 顶部工具栏保持不变 */}
         <div
           style={{
             padding: "8px 16px",
@@ -699,52 +780,40 @@ try {
             background: "#fafafa",
           }}
         >
+          <Segmented
+            options={[
+              { label: "代码编辑", value: "code", icon: <CodeOutlined /> },
+              {
+                label: "超级控制台",
+                value: "console",
+                icon: <ConsoleSqlOutlined />,
+              },
+            ]}
+            value={activeTab}
+            onChange={setActiveTab}
+          />
           <Space>
-            <Button
-              type={activeTab === "code" ? "primary" : "default"}
-              icon={<CodeOutlined />}
-              onClick={() => setActiveTab("code")}
+            <Dropdown
+              menu={{ items: toolMenuItems }}
+              placement="bottomRight"
+              arrow
             >
-              代码编辑
-            </Button>
-            <Button
-              type={activeTab === "console" ? "primary" : "default"}
-              icon={<ConsoleSqlOutlined />}
-              onClick={() => setActiveTab("console")}
-            >
-              超级控制台
-            </Button>
-          </Space>
-          <Space>
-            <Button
-              icon={<EyeOutlined />}
-              onClick={startInspector}
-              disabled={!isRunning || aiLoading}
-            >
-              拾取
-            </Button>
-            <Button
-              type="dashed"
-              icon={<RobotOutlined />}
-              style={{ color: "#722ed1", borderColor: "#722ed1" }}
-              onClick={startCaptchaInspector}
-              loading={aiLoading}
-              disabled={!isRunning}
-            >
-              AI 验证码
-            </Button>
-            {activeTab === "code" && (
+              <Button icon={<ExperimentOutlined />}>
+                调试工具 <DownOutlined style={{ fontSize: 10 }} />
+              </Button>
+            </Dropdown>
+            {activeTab === "code" ? (
               <Button
                 type="primary"
                 icon={<PlayCircleOutlined />}
                 onClick={runEval}
+                disabled={!isRunning}
               >
                 运行片段
               </Button>
-            )}
-            {activeTab === "console" && (
+            ) : (
               <Button icon={<ClearOutlined />} onClick={() => setLogs("")}>
-                清空
+                清空日志
               </Button>
             )}
           </Space>
@@ -788,6 +857,7 @@ try {
         </div>
       </Content>
 
+      {/* Intercept Modal 保持不变 */}
       <Modal
         title="编辑拦截规则"
         open={isRuleModalOpen}
@@ -797,13 +867,13 @@ try {
       >
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <div>
-            <Text>URL 匹配模式 (支持通配符 *)</Text>
+            <Text>URL 匹配模式</Text>
             <Input
               value={currentRule.urlPattern}
               onChange={(e) =>
                 setCurrentRule({ ...currentRule, urlPattern: e.target.value })
               }
-              placeholder="例如: **/api/v1/login 或 **/*.js"
+              placeholder="例如: **/main.js"
             />
           </div>
           <div style={{ display: "flex", gap: 10 }}>
@@ -817,7 +887,6 @@ try {
                 options={[
                   { value: "Script", label: "JS 脚本" },
                   { value: "XHR", label: "XHR/Fetch" },
-                  { value: "Image", label: "图片" },
                   { value: "All", label: "所有" },
                 ]}
                 style={{ width: "100%" }}
@@ -829,6 +898,7 @@ try {
                 value={currentRule.action}
                 onChange={(v) => setCurrentRule({ ...currentRule, action: v })}
                 options={[
+                  { value: "AST_Transform", label: "AST 自动还原 (新)" },
                   { value: "MockBody", label: "修改响应体" },
                   { value: "Abort", label: "阻断请求" },
                 ]}
@@ -838,22 +908,35 @@ try {
           </div>
           {currentRule.action === "MockBody" && (
             <div>
-              <Text>响应体内容 (JS代码或JSON)</Text>
+              <Text>内容</Text>
               <TextArea
                 rows={6}
                 value={currentRule.payload}
                 onChange={(e) =>
                   setCurrentRule({ ...currentRule, payload: e.target.value })
                 }
-                placeholder="// 在这里输入你要替换的 JS 代码..."
-                style={{ fontFamily: "monospace" }}
               />
+            </div>
+          )}
+          {currentRule.action === "AST_Transform" && (
+            <div
+              style={{
+                background: "#e6f7ff",
+                padding: "10px",
+                borderRadius: "4px",
+                border: "1px solid #91d5ff",
+              }}
+            >
+              <Text type="secondary">
+                <ToolOutlined /> 启用此选项后，后端将自动获取原始 JS
+                代码，使用内置的 AST 引擎进行反混淆，然后返回给浏览器。
+              </Text>
             </div>
           )}
         </div>
       </Modal>
 
-      {/* 🔥🔥🔥 新增：脚本编辑弹窗 🔥🔥🔥 */}
+      {/* 🔥🔥🔥 脚本编辑 Modal (新增 Timing 选项) 🔥🔥🔥 */}
       <Modal
         title="编辑自定义脚本"
         open={isScriptModalOpen}
@@ -867,7 +950,7 @@ try {
             display: "flex",
             flexDirection: "column",
             height: "100%",
-            gap: 10,
+            gap: 12,
           }}
         >
           <Input
@@ -877,6 +960,30 @@ try {
               setCurrentScript({ ...currentScript, name: e.target.value })
             }
           />
+
+          {/* 🔥 新增注入时机选择 🔥 */}
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <Text>注入时机:</Text>
+            <Radio.Group
+              value={currentScript.timing || "start"}
+              onChange={(e) =>
+                setCurrentScript({ ...currentScript, timing: e.target.value })
+              }
+            >
+              <Radio.Button value="start">
+                <RocketOutlined /> 加载前 (Pre-load)
+              </Radio.Button>
+              <Radio.Button value="load">
+                <ClockCircleOutlined /> 加载后 (Post-load)
+              </Radio.Button>
+            </Radio.Group>
+            <Text type="secondary" style={{ fontSize: 12, marginLeft: 10 }}>
+              {currentScript.timing === "load"
+                ? "页面完全加载后执行 (适合自动化操作)"
+                : "页面初始化时执行 (适合环境Hook)"}
+            </Text>
+          </div>
+
           <div style={{ flex: 1, border: "1px solid #d9d9d9" }}>
             <Editor
               height="100%"
@@ -889,9 +996,85 @@ try {
               options={{ minimap: { enabled: false }, fontSize: 14 }}
             />
           </div>
-          <div style={{ fontSize: 12, color: "#999" }}>
-            * 此代码将在浏览器环境(Page Context)中执行，可以访问 window,
-            document 等对象。
+        </div>
+      </Modal>
+
+      {/* AST Modal 保持不变 */}
+      <Modal
+        title="🛠️ AST 混淆还原工具"
+        open={isAstModalOpen}
+        footer={null}
+        onCancel={() => setIsAstModalOpen(false)}
+        width="90%"
+        styles={{ body: { height: "80vh", padding: 0 } }}
+        destroyOnClose
+      >
+        <div style={{ display: "flex", height: "100%" }}>
+          <div
+            style={{
+              flex: 1,
+              display: "flex",
+              flexDirection: "column",
+              borderRight: "1px solid #ddd",
+            }}
+          >
+            <div
+              style={{
+                padding: "8px",
+                background: "#fafafa",
+                borderBottom: "1px solid #eee",
+                fontWeight: "bold",
+              }}
+            >
+              混淆代码 (Input)
+            </div>
+            <Editor
+              height="100%"
+              defaultLanguage="javascript"
+              value={astSource}
+              onChange={(v) => setAstSource(v || "")}
+              theme="vs-light"
+              options={{ minimap: { enabled: false } }}
+            />
+          </div>
+          <div
+            style={{
+              width: 60,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "#f5f5f5",
+              flexDirection: "column",
+              gap: 16,
+            }}
+          >
+            <Button
+              type="primary"
+              shape="circle"
+              size="large"
+              icon={<ArrowRightOutlined />}
+              onClick={runAstDeobfuscate}
+              loading={astLoading}
+            />
+          </div>
+          <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+            <div
+              style={{
+                padding: "8px",
+                background: "#fafafa",
+                borderBottom: "1px solid #eee",
+                fontWeight: "bold",
+              }}
+            >
+              还原结果 (Output)
+            </div>
+            <Editor
+              height="100%"
+              defaultLanguage="javascript"
+              value={astResult}
+              options={{ readOnly: true, minimap: { enabled: false } }}
+              theme="vs-light"
+            />
           </div>
         </div>
       </Modal>
