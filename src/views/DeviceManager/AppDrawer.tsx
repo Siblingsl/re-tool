@@ -30,12 +30,14 @@ import {
   FolderOpenOutlined,
   FileTextOutlined,
   DownloadOutlined,
+  ToolOutlined,
 } from "@ant-design/icons";
 import { AppInfo, ViewMode, AppDetail, Device } from "../../types";
 import { invoke } from "@tauri-apps/api/core";
 import FridaConsole from "./FridaConsole";
 import FileExplorer from "../FileExplorer";
 import SoViewer from "./SoViewer"; // 🔥 引入新组件
+import PackerViewer from "./PackerViewer";
 
 interface AppDrawerProps {
   visible: boolean;
@@ -60,7 +62,9 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
 
   // 🔥 核心修改 1：状态升级
   // null = 关闭右侧, 'console' = Frida控制台, 'so' = SO查看器
-  const [rightPanel, setRightPanel] = useState<null | "console" | "so">(null);
+  const [rightPanel, setRightPanel] = useState<
+    null | "console" | "so" | "packer"
+  >(null);
 
   // 当前选中的脚本 ID
   const [selectedScriptId, setSelectedScriptId] = useState<string>(
@@ -348,14 +352,27 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
               </Button>
             </div>
 
-            <Button
-              block
-              danger
-              icon={<DeleteOutlined />}
-              onClick={handleUninstall}
-            >
-              卸载应用
-            </Button>
+            <div style={{ display: "flex", gap: 12 }}>
+              <Button
+                block
+                icon={<ToolOutlined />}
+                type={rightPanel === "packer" ? "primary" : "default"} // 高亮状态
+                onClick={() => {
+                  // 查壳/脱壳功能预留接口
+                  setRightPanel(rightPanel === "packer" ? null : "packer");
+                }}
+              >
+                查壳/脱壳
+              </Button>
+              <Button
+                block
+                danger
+                icon={<DeleteOutlined />}
+                onClick={handleUninstall}
+              >
+                卸载应用
+              </Button>
+            </div>
           </div>
         </div>
       ),
@@ -461,6 +478,18 @@ const AppDrawer: React.FC<AppDrawerProps> = ({
                 onAnalyze={(path) => {
                   // 预留接口
                   console.log("Analyze SO:", path);
+                }}
+              />
+            )}
+
+            {/* 情况 C: 显示查壳/脱壳界面 */}
+            {rightPanel === "packer" && (
+              <PackerViewer
+                onClose={() => setRightPanel(null)} // 关闭右侧
+                pkg={app.pkg}
+                onAnalyze={(res) => {
+                  // 预留接口
+                  console.log("packerViewer:", res);
                 }}
               />
             )}

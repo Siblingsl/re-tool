@@ -2,13 +2,13 @@ import React, { useState, useEffect } from "react";
 import { Empty, Button, Spin, message } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event"; // 🔥 引入 event
+import { listen } from "@tauri-apps/api/event";
 import "./App.css";
 
 import Sidebar from "./components/Sidebar";
 import DeviceManager from "./views/DeviceManager";
 import CodeConverter from "./views/CodeConverter";
-import DeviceScreen from "./views/DeviceScreen"; // 投屏组件
+import DeviceScreen from "./views/DeviceScreen";
 import { getConnectedDevices } from "./services/deviceService";
 
 import { ViewMode, Device } from "./types";
@@ -16,10 +16,9 @@ import ScriptLab from "./views/ScriptLab";
 import FileExplorer from "./views/FileExplorer";
 import ApkBuilder from "./views/ApkBuilder";
 import JavaAnalyzer from "./views/JavaAnalyzer";
-import PackerLab from "./views/PackerLab";
 import NetworkSniffer from "./views/NetworkSniffer";
 import WebLab from "./views/WebLab";
-import AiChatPage from "./views/AiChatPage";
+import AiWorkbenchPage from "./views/AiChatPage"; // 确保引用的是工作台组件
 
 // 定义脚本接口
 export interface ScriptItem {
@@ -85,21 +84,17 @@ const App: React.FC = () => {
   const [loadingDevices, setLoadingDevices] = useState(false);
   const [converterContext, setConverterContext] = useState("");
 
-  // 🔥 新增：全局脚本状态
   const [scripts, setScripts] = useState<ScriptItem[]>(() => {
     const saved = localStorage.getItem("my_scripts");
     return saved ? JSON.parse(saved) : DEFAULT_SCRIPTS;
   });
 
-  // 保存脚本的方法
   const handleSaveScript = (newScript: ScriptItem) => {
     const newList = scripts.map((s) => (s.id === newScript.id ? newScript : s));
-    // 如果是新的，就 push (这里简化处理，假设只修改)
     setScripts(newList);
     localStorage.setItem("my_scripts", JSON.stringify(newList));
   };
 
-  // 🔥 1. 新增：在 App 层级管理别名 (从 Sidebar 搬过来的逻辑)
   const [deviceAliases, setDeviceAliases] = useState<Record<string, string>>(
     () => {
       try {
@@ -111,7 +106,6 @@ const App: React.FC = () => {
     }
   );
 
-  // 🔥 2. 新增：更新别名的函数 (传给 Sidebar 用)
   const handleRenameDevice = (id: string, newName: string) => {
     const newAliases = { ...deviceAliases, [id]: newName };
     setDeviceAliases(newAliases);
@@ -122,8 +116,7 @@ const App: React.FC = () => {
     setLoadingDevices(true);
     try {
       const realDevices = await getConnectedDevices();
-      // 如果获取失败或是空，回退到 Mock 数据方便调试 (可选)
-      const finalDevices = realDevices.length > 0 ? realDevices : []; // 或者 MOCK_DEVICES
+      const finalDevices = realDevices.length > 0 ? realDevices : [];
       setDevices(finalDevices);
 
       if (finalDevices.length > 0) {
@@ -142,16 +135,12 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    // 1. 初次加载
     refreshDevices();
-
-    // 2. 🔥 监听后端发来的 "设备变动" 事件
     const unlistenPromise = listen("device-changed", () => {
       console.log("检测到设备变动，自动刷新...");
-      refreshDevices(); // 自动调用刷新
+      refreshDevices();
     });
 
-    // 3. 清理监听器
     return () => {
       unlistenPromise.then((unlisten) => unlisten());
     };
@@ -162,10 +151,8 @@ const App: React.FC = () => {
     if (contextData) setConverterContext(contextData);
   };
 
-  // --- 🔥 关键逻辑：计算当前选中的设备，并应用别名 ---
   const rawDevice =
     devices.find((d) => d.id === selectedDeviceId) || devices[0];
-  // 如果有别名，覆盖原始 name，这样右侧所有组件都会显示新名字！
   const currentDevice = rawDevice
     ? {
         ...rawDevice,
@@ -182,7 +169,6 @@ const App: React.FC = () => {
         selectedDeviceId={selectedDeviceId}
         onDeviceSelect={setSelectedDeviceId}
         onRefresh={refreshDevices}
-        // 🔥 传下去：别名数据和修改方法
         deviceAliases={deviceAliases}
         onRenameDevice={handleRenameDevice}
       />
@@ -191,7 +177,7 @@ const App: React.FC = () => {
         {currentView === "device" &&
           (currentDevice ? (
             <DeviceManager
-              device={currentDevice} // 这里的 device.name 已经是别名了
+              device={currentDevice}
               onNavigate={handleNavigate}
               scripts={scripts}
             />
@@ -222,7 +208,7 @@ const App: React.FC = () => {
             </div>
           ))}
         {currentView === "network-sniffer" && (
-          <NetworkSniffer devices={devices} deviceAliases={deviceAliases} /> // ✅ 把设备列表传进去
+          <NetworkSniffer devices={devices} deviceAliases={deviceAliases} />
         )}
         {currentView === "file-manager" && currentDevice && (
           <FileExplorer
@@ -233,8 +219,8 @@ const App: React.FC = () => {
         )}
         {currentView === "script-lab" && (
           <ScriptLab
-            scripts={scripts} // 🔥 传给脚本工坊
-            onSave={handleSaveScript} // 🔥 允许修改
+            scripts={scripts}
+            onSave={handleSaveScript}
             currentDeviceId={selectedDeviceId}
           />
         )}
@@ -245,12 +231,8 @@ const App: React.FC = () => {
 
         {currentView === "java-analyzer" && <JavaAnalyzer />}
 
-        {currentView === "packer-lab" && (
-          <PackerLab currentDevice={currentDevice} />
-        )}
-
         {currentView === "show" && currentDevice && (
-          <DeviceScreen device={currentDevice} /> // 投屏页的标题也会自动变
+          <DeviceScreen device={currentDevice} />
         )}
         {currentView === "algo-converter" && (
           <CodeConverter initialCode={converterContext} />
@@ -260,10 +242,7 @@ const App: React.FC = () => {
           <Empty description="ARM 汇编实验室" style={{ marginTop: 100 }} />
         )}
         {currentView.startsWith("ai-chat") && (
-          <AiChatPage
-            // 解析出 ID：从 "ai-chat-123" 中截取 "123"
-            sessionId={currentView.replace("ai-chat-", "")}
-          />
+          <AiWorkbenchPage sessionId={currentView.replace("ai-chat-", "")} />
         )}
       </div>
     </div>

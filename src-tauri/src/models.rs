@@ -47,10 +47,10 @@ pub struct FileItem {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileNode {
-    pub title: String,
     pub key: String,
     #[serde(rename = "isLeaf")]
     pub is_leaf: bool, 
+    pub title: String,
     pub children: Option<Vec<FileNode>>,
 }
 

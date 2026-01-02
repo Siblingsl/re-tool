@@ -1288,7 +1288,6 @@ const Sidebar: React.FC<SidebarProps> = ({
               <CoffeeOutlined />,
               "Java 源码分析"
             )}
-            {renderNavItem("packer-lab", <ToolOutlined />, "壳工坊")}
             {renderNavItem("algo-converter", <CodeOutlined />, "伪代码转译")}
             {renderNavItem("web-lab", <CompassOutlined />, "Web 逆向实验室")}
             {renderNavItem("asm-lab", <BugOutlined />, "ARM 汇编实验室")}
@@ -1681,7 +1680,7 @@ const Sidebar: React.FC<SidebarProps> = ({
         open={isSettingsOpen}
         onCancel={() => setIsSettingsOpen(false)}
         footer={null}
-        width={720} // 加宽一点，适合左右布局
+        width={840} // 加宽一点，适合左右布局
         centered
         styles={{ body: { padding: 0 } }} // 移除默认 padding，自己控制布局
         closeIcon={null} // 隐藏默认关闭按钮，我们自己画或者不需要
@@ -1697,7 +1696,7 @@ const Sidebar: React.FC<SidebarProps> = ({
           {/* === 左侧：导航栏 === */}
           <div
             style={{
-              width: 200,
+              width: 150,
               backgroundColor: "#f5f5f5",
               borderRight: "1px solid #e8e8e8",
               padding: "20px 0",

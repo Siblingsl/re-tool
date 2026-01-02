@@ -1,16 +1,16 @@
 import React, { useState, useRef, useEffect } from "react";
 import {
-  SendOutlined,
+  CloudSyncOutlined,
+  MobileOutlined,
+  FundViewOutlined,
+  FileZipOutlined,
+  CloseOutlined,
+  WifiOutlined,
   RobotOutlined,
-  UserOutlined,
-  DeleteOutlined,
-  CopyOutlined,
-  BulbOutlined,
-  CodeOutlined,
-  BugOutlined,
-  DownOutlined,
-  CheckOutlined,
-  LoadingOutlined, // 新增
+  WarningOutlined,
+  PaperClipOutlined,
+  SendOutlined,
+  LoadingOutlined,
 } from "@ant-design/icons";
 import {
   Input,
@@ -18,547 +18,788 @@ import {
   Avatar,
   List,
   theme,
+  Card,
+  Upload,
+  Steps,
+  Tag,
+  Alert,
   Tooltip,
-  message,
-  Empty,
-  Dropdown,
-  MenuProps,
+  Modal,
+  Badge,
+  Progress, // ✅ 新增引用
 } from "antd";
 import { useLiveQuery } from "dexie-react-hooks";
 import { db } from "@/db";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event"; // ✅ 新增引用
 
 const { TextArea } = Input;
 
-// 扩展 Message 接口以支持 reasoning
-interface Message {
-  id?: number;
-  sessionId: string;
-  role: "user" | "ai";
-  content: string;
-  reasoning?: string; // 新增推理字段
-  time: string;
+// --- 类型定义 ---
+type TaskPhase =
+  | "IDLE"
+  | "LOCAL_PREPROCESS"
+  | "CLOUD_HANDSHAKE"
+  | "ON_DEMAND_ANALYSIS"
+  | "NATIVE_ANALYSIS"
+  | "DYNAMIC_VERIFY"
+  | "COMPLETED";
+
+interface LogEntry {
+  source: "Local" | "Cloud" | "Agent" | "Device";
+  msg: string;
+  codeSnippet?: string;
+  type?: "info" | "success" | "warning" | "error";
 }
 
-interface AiChatPageProps {
-  sessionId?: string;
-}
-
-const QUICK_PROMPTS = [
-  { icon: <CodeOutlined />, text: "生成 Frida Hook 模板" },
-  { icon: <BulbOutlined />, text: "解释这段 Smali 代码" },
-  { icon: <BugOutlined />, text: "分析网络请求加密" },
-];
-
-const AiChatPage: React.FC<AiChatPageProps> = ({ sessionId = "default" }) => {
+const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
+  sessionId = "default",
+}) => {
   const { token } = theme.useToken();
-  const [inputValue, setInputValue] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [chatInput, setChatInput] = useState("");
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const initLockRef = useRef<string | null>(null);
+  const logsEndRef = useRef<HTMLDivElement>(null);
 
-  // 1. 实时获取消息
-  const messages =
-    useLiveQuery(async () => {
-      // 强制确保 sessionId 是字符串，防止 undefined 传给 IndexedDB
-      const currentSid = sessionId || "default";
+  // 进度条状态
+  const [progressPercent, setProgressPercent] = useState(0);
 
-      return await db.chatMessages
-        .where("sessionId")
-        .equals(currentSid)
-        .toArray();
-    }, [sessionId]) || [];
-
-  // 2. 获取当前激活配置
-  const activeConfig = useLiveQuery(async () => {
-    const allConfigs = await db.aiConfigs.toArray();
-    // 在内存中查找，避免底层 IndexedDB 的 key range 错误
-    return allConfigs.find((c) => c.isActive === true);
-  });
-
-  // 初始化欢迎语
+  // Session Ref
+  const currentSessionRef = useRef(sessionId);
   useEffect(() => {
-    const initChat = async () => {
-      if (!sessionId) return;
-      if (initLockRef.current === sessionId) return;
-      initLockRef.current = sessionId;
-
-      try {
-        const count = await db.chatMessages.where({ sessionId }).count();
-        if (count === 0) {
-          await db.chatMessages.add({
-            sessionId,
-            role: "ai",
-            content: "你好！我是你的逆向工程 AI 助手。请问有什么可以帮你的？",
-            time: new Date().toLocaleTimeString(),
-          });
-        }
-      } catch (error) {
-        console.error(error);
-      }
-    };
-    initChat();
+    currentSessionRef.current = sessionId;
   }, [sessionId]);
 
-  // 自动滚动
+  // Render-time Reset
+  const [prevSessionId, setPrevSessionId] = useState(sessionId);
+  const initialTaskState = {
+    isTaskPanelOpen: false,
+    activeApkName: "",
+    currentPhase: "IDLE" as TaskPhase,
+    logs: [] as LogEntry[],
+    isWaitingForIda: false,
+    isIdaHelpModalOpen: false,
+    idaCodeInput: "",
+  };
+  const [taskState, setTaskState] = useState(initialTaskState);
+
+  if (sessionId !== prevSessionId) {
+    setPrevSessionId(sessionId);
+    setTaskState(initialTaskState);
+    setProgressPercent(0); // 重置进度条
+  }
+
+  const {
+    isTaskPanelOpen,
+    activeApkName,
+    currentPhase,
+    logs,
+    isWaitingForIda,
+    isIdaHelpModalOpen,
+    idaCodeInput,
+  } = taskState;
+
+  const updateState = (updates: Partial<typeof initialTaskState>) => {
+    setTaskState((prev) => ({ ...prev, ...updates }));
+  };
+
+  const messages =
+    useLiveQuery(async () => {
+      return await db.chatMessages.where({ sessionId }).toArray();
+    }, [sessionId]) || [];
+
+  // Load state
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    const savedState = localStorage.getItem(`task_state_${sessionId}`);
+    if (savedState) {
+      try {
+        const data = JSON.parse(savedState);
+        updateState({
+          activeApkName: data.activeApkName || "",
+          currentPhase: data.currentPhase || "IDLE",
+          logs: data.logs || [],
+          isWaitingForIda: data.isWaitingForIda || false,
+          isTaskPanelOpen: false,
+          isIdaHelpModalOpen: false,
+        });
+        // 恢复时如果已经完成，进度条设为100
+        if (data.currentPhase === "COMPLETED" || data.currentPhase !== "IDLE") {
+          setProgressPercent(100);
+        }
+      } catch (e) {
+        console.error("存档加载失败", e);
+      }
     }
-  }, [messages]);
+    setChatInput("");
+    setPendingFile(null);
+  }, [sessionId]);
 
-  // 🔥 核心：处理流式发送
-  const handleSend = async () => {
-    if (!inputValue.trim()) return;
-    if (!activeConfig) {
-      message.error("请先在设置中配置并启用 AI 模型！");
-      return;
-    }
+  // Auto save
+  useEffect(() => {
+    if (currentPhase === "IDLE" && !activeApkName && logs.length === 0) return;
+    const stateToSave = {
+      activeApkName,
+      currentPhase,
+      logs,
+      isWaitingForIda,
+    };
+    localStorage.setItem(
+      `task_state_${sessionId}`,
+      JSON.stringify(stateToSave)
+    );
+  }, [sessionId, activeApkName, currentPhase, logs, isWaitingForIda]);
 
-    const userContent = inputValue;
-    setInputValue("");
-    setLoading(true);
+  useEffect(() => {
+    if (logsEndRef.current)
+      logsEndRef.current.scrollIntoView({ behavior: "smooth" });
+  }, [logs, isTaskPanelOpen]);
+
+  const addLog = (
+    source: LogEntry["source"],
+    msg: string,
+    type: LogEntry["type"] = "info",
+    codeSnippet?: string
+  ) => {
+    setTaskState((prev) => ({
+      ...prev,
+      logs: [...prev.logs, { source, msg, type, codeSnippet }],
+    }));
+  };
+
+  const sendAiMessage = async (content: string) => {
+    await db.chatMessages.add({
+      sessionId,
+      role: "ai",
+      content,
+      time: new Date().toLocaleTimeString(),
+    });
+  };
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  // ==========================================
+  // 🔥 任务执行流程
+  // ==========================================
+
+  const startPipeline = async (file: File) => {
+    updateState({
+      isTaskPanelOpen: true,
+      activeApkName: file.name,
+      logs: [],
+      isWaitingForIda: false,
+      currentPhase: "LOCAL_PREPROCESS",
+    });
+    setProgressPercent(0);
+    addLog("Local", `开始处理文件: ${file.name}`, "info");
+
+    let unlistenJadx: () => void = () => {};
+    let unlistenConnect: () => void = () => {};
 
     try {
-      // 1. 用户消息入库
-      await db.chatMessages.add({
-        sessionId,
-        role: "user",
-        content: userContent,
-        time: new Date().toLocaleTimeString(),
+      // 1. 监听 JADX 进度
+      addLog("Local", "启动 JADX 引擎...", "info");
+      unlistenJadx = await listen("jadx-progress-tick", () => {
+        setProgressPercent((prev) => {
+          const next = prev + (99 - prev) * 0.05;
+          return next > 99 ? 99 : next;
+        });
       });
 
-      // 2. 预先创建一条空的 AI 消息占位 (用于流式更新)
-      const aiMsgId = await db.chatMessages.add({
-        sessionId,
-        role: "ai",
-        content: "",
-        reasoning: "", // 初始为空
-        time: new Date().toLocaleTimeString(),
+      // 2. 执行 JADX 反编译
+      const outputDir = await invoke("jadx_decompile", {
+        apkPath: file.name,
       });
 
-      // 3. 准备请求体
-      const historyContext = messages.slice(-10).map((m) => ({
-        role: m.role === "user" ? "user" : "assistant",
-        content: m.content,
-      }));
+      unlistenJadx();
+      setProgressPercent(100);
+      addLog("Local", `反编译完成，输出路径: ${outputDir}`, "success");
 
-      const requestBody: any = {
-        model: activeConfig.modelId,
-        messages: [
-          {
-            role: "system",
-            content: "你是一个精通 Android 逆向工程的安全专家。",
-          },
-          ...historyContext,
-          { role: "user", content: userContent },
-        ],
-        temperature: 0.6,
-        top_p: 0.7,
-        max_tokens: 8192,
-        stream: true, // ✅ 开启流式
-      };
+      // =======================================================
+      // 🔥🔥🔥 核心修正：等待 Agent 连接成功的信号 🔥🔥🔥
+      // =======================================================
+      updateState({ currentPhase: "CLOUD_HANDSHAKE" });
+      addLog("Local", "正在连接云端大脑 (等待握手)...", "info");
 
-      // ✅ 针对 NVIDIA / DeepSeek 的特殊处理
-      if (
-        activeConfig.baseUrl?.includes("nvidia") ||
-        activeConfig.modelId.includes("deepseek")
-      ) {
-        requestBody.chat_template_kwargs = { thinking: true };
-      }
+      // 这里创建一个 Promise，直到收到 'agent-connected-success' 事件才 resolve
+      await new Promise<void>(async (resolve, reject) => {
+        // 设置一个 15秒 的超时，防止永远卡死
+        const timeout = setTimeout(() => {
+          reject("连接云端超时 (15s)，请检查网络");
+        }, 15000);
 
-      // 4. 发起请求
-      const response = await fetch(`${activeConfig.baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${activeConfig.apiKey}`,
-        },
-        body: JSON.stringify(requestBody),
+        // 监听连接成功事件
+        unlistenConnect = await listen("agent-connected-success", () => {
+          clearTimeout(timeout);
+          addLog("Agent", "✅ 与云端建立长连接成功！", "success");
+          resolve();
+        });
+
+        // 触发连接 (如果你在 useEffect 里已经连了，这里可以重复调用一次确保万一，或者依赖 useEffect 的结果)
+        // 建议：为了保险，这里再次明确调用连接
+        invoke("connect_agent", { sessionId }).catch(reject);
       });
 
-      if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
-      if (!response.body) throw new Error("ReadableStream not supported");
+      unlistenConnect(); // 清理监听器
 
-      // 5. 处理流式响应
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-      let done = false;
-      let fullContent = "";
-      let fullReasoning = "";
-
-      while (!done) {
-        const { value, done: doneReading } = await reader.read();
-        done = doneReading;
-        const chunkValue = decoder.decode(value, { stream: true });
-
-        // 处理 SSE 数据包 (例如: data: {...})
-        const lines = chunkValue
-          .split("\n")
-          .filter((line) => line.trim() !== "");
-
-        for (const line of lines) {
-          if (line.includes("[DONE]")) continue;
-          if (line.startsWith("data: ")) {
-            try {
-              const jsonStr = line.replace("data: ", "");
-              const data = JSON.parse(jsonStr);
-              const delta = data.choices[0]?.delta;
-
-              if (delta) {
-                // ✅ 捕获推理内容 (DeepSeek/NVIDIA 特有)
-                if (delta.reasoning_content) {
-                  fullReasoning += delta.reasoning_content;
-                }
-                // 捕获普通内容
-                if (delta.content) {
-                  fullContent += delta.content;
-                }
-
-                // 实时更新数据库 -> 驱动 UI 刷新
-                // 注意：为了性能，实际生产中通常会节流更新，这里直接更新方便演示
-                await db.chatMessages.update(aiMsgId, {
-                  content: fullContent,
-                  reasoning: fullReasoning,
-                });
-              }
-            } catch (e) {
-              console.warn("Parse error", e);
-            }
-          }
-        }
-      }
-
-      // 更新会话摘要
-      await db.chatSessions.update(sessionId, {
-        lastUpdated: Date.now(),
-        title: messages.length < 2 ? userContent.slice(0, 15) : undefined,
+      // 3. 只有收到成功信号后，才通知云端
+      addLog("Local", "发送任务就绪指令...", "info");
+      await invoke("notify_cloud_job_start", {
+        sessionId: sessionId,
+        filePath: outputDir,
       });
-    } catch (error: any) {
-      console.error(error);
-      await db.chatMessages.add({
-        sessionId,
-        role: "ai",
-        content: `❌ 请求出错: ${error.message}`,
-        time: new Date().toLocaleTimeString(),
-      });
-    } finally {
-      setLoading(false);
+    } catch (e) {
+      unlistenJadx();
+      if (unlistenConnect) unlistenConnect();
+      setProgressPercent(0);
+      addLog("Local", `处理失败: ${e}`, "error");
     }
   };
 
-  const handleClear = async () => {
-    await db.chatMessages.where({ sessionId }).delete();
-    message.success("对话记录已清空");
+  const handleIdaCodeSubmit = async () => {
+    if (!idaCodeInput.trim()) return;
+    updateState({ isIdaHelpModalOpen: false, isWaitingForIda: false });
+    await db.chatMessages.add({
+      sessionId,
+      role: "user",
+      content:
+        "这是 IDA 的伪代码：\n```c\n" + idaCodeInput.slice(0, 50) + "...\n```",
+      time: new Date().toLocaleTimeString(),
+    });
+    addLog("Local", "已发送人工辅助代码", "success");
+    addLog("Agent", "接收代码成功，继续分析逻辑...", "info");
+    await sleep(1500);
+    startDynamicVerify();
   };
 
-  const handleCopy = (content: string) => {
-    navigator.clipboard.writeText(content);
-    message.success("已复制内容");
+  const startDynamicVerify = async () => {
+    const executionSessionId = sessionId;
+    updateState({ currentPhase: "DYNAMIC_VERIFY" });
+    addLog("Agent", "正在生成 Frida Hook 脚本...", "info");
+    await sleep(1000);
+    if (currentSessionRef.current !== executionSessionId) return;
+
+    addLog("Cloud", "指令: EXEC_FRIDA(script_id=882)", "warning");
+    addLog("Local", "连接设备: OnePlus 6", "info");
+    addLog("Device", "Spawn com.example.app...", "info");
+
+    await sleep(1000);
+    addLog("Device", "💥 Process Crashed (Signal 11)", "error");
+    addLog("Local", "检测到反调试，正在上报异常...", "error");
+
+    await sleep(1500);
+    if (currentSessionRef.current !== executionSessionId) return;
+    addLog("Cloud", "策略调整: 启用 Anti-Anti-Frida 脚本", "warning");
+    await sleep(1000);
+    addLog(
+      "Device",
+      "✅ Hook 成功！[Frida] input='hello', output='a1b2...'",
+      "success"
+    );
+
+    updateState({ currentPhase: "COMPLETED" });
+    sendAiMessage("全托管分析完成！Hook 脚本已生成。");
   };
 
-  const modelMenuProps: MenuProps = {
-    items: activeConfig
-      ? [
-          {
-            key: activeConfig.modelId,
-            label: (
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  gap: 12,
-                  minWidth: 120,
-                }}
-              >
-                <span>{activeConfig.name}</span>
-                <CheckOutlined
-                  style={{ color: token.colorPrimary, fontSize: 12 }}
-                />
-              </div>
-            ),
-          },
-        ]
-      : [{ key: "none", label: "未配置模型", disabled: true }],
+  const handleSend = async () => {
+    if (!chatInput.trim() && !pendingFile) return;
+    await db.chatMessages.add({
+      sessionId,
+      role: "user",
+      content: pendingFile
+        ? `[文件] ${pendingFile.name}\n${chatInput}`
+        : chatInput,
+      time: new Date().toLocaleTimeString(),
+    });
+
+    if (pendingFile) {
+      const file = pendingFile;
+      setPendingFile(null);
+      setChatInput("");
+      setTimeout(async () => {
+        await sendAiMessage(`收到 ${file.name}。已启动分析流水线。`);
+        startPipeline(file);
+      }, 500);
+    } else {
+      setChatInput("");
+    }
   };
+
+  const handleFileSelect = (file: File) => {
+    setPendingFile(file);
+    return false;
+  };
+  const isTaskActive = currentPhase !== "IDLE" && currentPhase !== "COMPLETED";
 
   return (
     <div
       style={{
+        height: "100%",
         display: "flex",
         flexDirection: "column",
-        height: "100%",
-        backgroundColor: "#fff",
-        position: "relative",
+        background: "#f5f7fa",
       }}
     >
-      {/* 顶部栏 */}
+      {/* Header */}
       <div
-        className="content-header"
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <Avatar
-            shape="square"
-            size="large"
-            icon={<RobotOutlined />}
-            style={{ backgroundColor: token.colorPrimary }}
-          />
-          <div>
-            <div style={{ fontWeight: 600, fontSize: 16 }}>智能逆向助手</div>
-            <Dropdown menu={modelMenuProps} trigger={["click"]}>
-              <div
-                style={{
-                  fontSize: 12,
-                  color: "#666",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  cursor: "pointer",
-                  marginTop: 2,
-                  userSelect: "none",
-                }}
-              >
-                <span
-                  style={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: "50%",
-                    background: activeConfig ? "#52c41a" : "#ccc",
-                    display: "inline-block",
-                  }}
-                ></span>
-                <span>{activeConfig ? activeConfig.name : "未配置"}</span>
-                <DownOutlined style={{ fontSize: 10, color: "#999" }} />
-              </div>
-            </Dropdown>
-          </div>
-        </div>
-        <Tooltip title="清空对话">
-          <Button type="text" icon={<DeleteOutlined />} onClick={handleClear} />
-        </Tooltip>
-      </div>
-
-      {/* 消息列表 */}
-      <div
-        ref={scrollRef}
         style={{
-          flex: 1,
-          overflowY: "auto",
-          padding: "20px 24px",
-          backgroundColor: "#fafafa",
+          height: 60,
+          background: "#fff",
+          borderBottom: "1px solid #e8e8e8",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "0 24px",
+          flexShrink: 0,
+          zIndex: 10,
         }}
       >
-        {messages.length === 0 ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div
             style={{
-              height: "100%",
+              width: 32,
+              height: 32,
+              background: token.colorPrimary,
+              borderRadius: 8,
               display: "flex",
-              flexDirection: "column",
-              justifyContent: "center",
               alignItems: "center",
-              opacity: 0.6,
+              justifyContent: "center",
+              color: "#fff",
+              fontSize: 18,
             }}
           >
-            <Empty description="暂无对话，开始提问吧" />
-            <div
-              style={{
-                marginTop: 20,
-                display: "flex",
-                gap: 10,
-                flexWrap: "wrap",
-                justifyContent: "center",
-              }}
-            >
-              {QUICK_PROMPTS.map((item, idx) => (
-                <Button
-                  key={idx}
-                  icon={item.icon}
-                  onClick={() => setInputValue(item.text)}
-                >
-                  {item.text}
-                </Button>
-              ))}
-            </div>
+            <CloudSyncOutlined />
           </div>
-        ) : (
-          <List
-            itemLayout="horizontal"
-            dataSource={messages}
-            split={false}
-            renderItem={(item) => (
-              <div
-                style={{
-                  display: "flex",
-                  marginBottom: 20,
-                  flexDirection: item.role === "user" ? "row-reverse" : "row",
-                  gap: 12,
-                }}
+          <span style={{ fontWeight: 600, fontSize: 16 }}>
+            Reverse Agent Pro
+          </span>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ display: "flex", gap: 8, marginRight: 16 }}>
+            <Tooltip title="云端服务正常">
+              <Tag
+                icon={<WifiOutlined />}
+                color="success"
+                style={{ cursor: "default" }}
               >
-                <Avatar
-                  icon={
-                    item.role === "user" ? <UserOutlined /> : <RobotOutlined />
+                云端: 在线
+              </Tag>
+            </Tooltip>
+            <Tooltip title="USB 连接正常">
+              <Tag
+                icon={<MobileOutlined />}
+                color="processing"
+                style={{ cursor: "default" }}
+              >
+                OnePlus 6
+              </Tag>
+            </Tooltip>
+          </div>
+          <div style={{ width: 1, height: 20, background: "#f0f0f0" }}></div>
+          {activeApkName && (
+            <Tooltip title={isTaskPanelOpen ? "收起面板" : "展开任务监控"}>
+              <Badge dot={!isTaskPanelOpen && isTaskActive} offset={[-6, 6]}>
+                <Button
+                  type={isTaskPanelOpen ? "primary" : "text"}
+                  shape="square"
+                  size="middle"
+                  icon={<FundViewOutlined style={{ fontSize: 20 }} />}
+                  onClick={() =>
+                    updateState({ isTaskPanelOpen: !isTaskPanelOpen })
                   }
                   style={{
-                    backgroundColor:
-                      item.role === "user"
-                        ? token.colorInfo
-                        : token.colorPrimary,
-                    flexShrink: 0,
+                    transition: "all 0.3s",
+                    color: isTaskPanelOpen ? "#fff" : token.colorTextSecondary,
+                    backgroundColor: isTaskPanelOpen
+                      ? token.colorPrimary
+                      : "transparent",
                   }}
                 />
-                <div style={{ maxWidth: "80%" }}>
-                  {/* ✅ 展示推理过程 (深度思考) */}
-                  {item.reasoning && (
-                    <div
-                      style={{
-                        marginBottom: 8,
-                        padding: "8px 12px",
-                        backgroundColor: "#f5f5f5",
-                        borderLeft: "3px solid #d9d9d9",
-                        borderRadius: 4,
-                        fontSize: 12,
-                        color: "#666",
-                        whiteSpace: "pre-wrap",
-                      }}
-                    >
-                      <div
-                        style={{
-                          fontWeight: "bold",
-                          marginBottom: 4,
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 4,
-                        }}
-                      >
-                        <BulbOutlined /> 深度思考过程:
-                      </div>
-                      {item.reasoning}
-                    </div>
-                  )}
-
-                  <div
-                    style={{
-                      backgroundColor:
-                        item.role === "user" ? token.colorPrimary : "#fff",
-                      color: item.role === "user" ? "#fff" : "rgba(0,0,0,0.85)",
-                      padding: "10px 16px",
-                      borderRadius:
-                        item.role === "user"
-                          ? "12px 0 12px 12px"
-                          : "0 12px 12px 12px",
-                      boxShadow: "0 2px 5px rgba(0,0,0,0.05)",
-                      whiteSpace: "pre-wrap",
-                      border: item.role === "ai" ? "1px solid #f0f0f0" : "none",
-                    }}
-                  >
-                    {item.content}
-                    {/* 如果正在加载且内容为空，显示 Loading */}
-                    {loading &&
-                      item.role === "ai" &&
-                      !item.content &&
-                      !item.reasoning && <LoadingOutlined />}
-                  </div>
-
-                  <div
-                    style={{
-                      fontSize: 11,
-                      color: "#ccc",
-                      marginTop: 4,
-                      textAlign: item.role === "user" ? "right" : "left",
-                      paddingLeft: 4,
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                      justifyContent:
-                        item.role === "user" ? "flex-end" : "flex-start",
-                    }}
-                  >
-                    <span>{item.time}</span>
-                    {item.role === "ai" && (
-                      <CopyOutlined
-                        style={{ cursor: "pointer" }}
-                        onClick={() => handleCopy(item.content)}
-                      />
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
-          />
-        )}
-      </div>
-
-      {/* 底部输入框 */}
-      <div
-        style={{
-          padding: "16px 24px",
-          borderTop: "1px solid #f0f0f0",
-          backgroundColor: "#fff",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            gap: 10,
-            alignItems: "flex-end",
-            border: `1px solid ${token.colorBorder}`,
-            borderRadius: 8,
-            padding: "8px 12px",
-            boxShadow: "0 2px 8px rgba(0,0,0,0.02)",
-            transition: "border 0.2s",
-          }}
-          onFocus={(e) =>
-            (e.currentTarget.style.borderColor = token.colorPrimary)
-          }
-          onBlur={(e) =>
-            (e.currentTarget.style.borderColor = token.colorBorder)
-          }
-        >
-          <TextArea
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            placeholder={
-              activeConfig
-                ? `正在询问 ${activeConfig.name}... (Shift + Enter 换行)`
-                : "请配置 AI 模型"
-            }
-            autoSize={{ minRows: 1, maxRows: 6 }}
-            bordered={false}
-            disabled={!activeConfig || loading}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleSend();
-              }
-            }}
-            style={{ padding: 0, resize: "none" }}
-          />
-          <Button
-            type="primary"
-            shape="circle"
-            icon={loading ? <LoadingOutlined /> : <SendOutlined />}
-            onClick={handleSend}
-            loading={loading}
-            disabled={!inputValue.trim() || !activeConfig}
-          />
-        </div>
-        <div
-          style={{
-            marginTop: 8,
-            fontSize: 12,
-            color: "#999",
-            textAlign: "center",
-          }}
-        >
-          {activeConfig ? (
-            `当前模型: ${activeConfig.name}`
-          ) : (
-            <span style={{ color: "#ff4d4f" }}>未配置模型</span>
+              </Badge>
+            </Tooltip>
           )}
         </div>
       </div>
+
+      {/* Main Content */}
+      <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+        {/* Left: Chat */}
+        <div
+          style={{
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+            borderRight: "1px solid #e8e8e8",
+            background: "#fff",
+            maxWidth: isTaskPanelOpen ? "60%" : "100%",
+            transition: "max-width 0.3s cubic-bezier(0.2, 0, 0, 1)",
+          }}
+        >
+          <div
+            ref={scrollRef}
+            style={{ flex: 1, overflowY: "auto", padding: "20px" }}
+          >
+            <List
+              dataSource={messages}
+              split={false}
+              renderItem={(item) => (
+                <div
+                  style={{
+                    display: "flex",
+                    marginBottom: 20,
+                    flexDirection: item.role === "user" ? "row-reverse" : "row",
+                    gap: 12,
+                  }}
+                >
+                  {" "}
+                  <Avatar
+                    size={36}
+                    style={{
+                      backgroundColor:
+                        item.role === "user" ? token.colorPrimary : "#333",
+                    }}
+                    icon={item.role === "user" ? null : <RobotOutlined />}
+                  />{" "}
+                  <div
+                    style={{
+                      maxWidth: "85%",
+                      background:
+                        item.role === "user" ? token.colorPrimary : "#f7f7f7",
+                      color: item.role === "user" ? "#fff" : "#333",
+                      padding: "10px 16px",
+                      borderRadius: 12,
+                      fontSize: 14,
+                      whiteSpace: "pre-wrap",
+                      lineHeight: 1.6,
+                    }}
+                  >
+                    {" "}
+                    {item.content}{" "}
+                  </div>{" "}
+                </div>
+              )}
+            />
+          </div>
+
+          <div style={{ padding: "20px", borderTop: "1px solid #f0f0f0" }}>
+            {isWaitingForIda && (
+              <Alert
+                message="任务挂起：等待人工介入"
+                description="Agent 遇到了无法解决的混淆，需要您提供 IDA 伪代码以继续分析。"
+                type="warning"
+                showIcon
+                icon={<WarningOutlined />}
+                action={
+                  <Button
+                    size="small"
+                    type="primary"
+                    ghost
+                    onClick={() => updateState({ isIdaHelpModalOpen: true })}
+                  >
+                    {" "}
+                    输入代码{" "}
+                  </Button>
+                }
+                style={{
+                  marginBottom: 12,
+                  border: "1px solid #ffe58f",
+                  background: "#fffbe6",
+                }}
+              />
+            )}
+            {pendingFile && (
+              <Alert
+                message={`准备解析: ${pendingFile.name}`}
+                type="info"
+                showIcon
+                closable
+                onClose={() => setPendingFile(null)}
+                style={{ marginBottom: 10 }}
+              />
+            )}
+            <div
+              style={{
+                display: "flex",
+                gap: 10,
+                alignItems: "flex-end",
+                background: "#f9f9f9",
+                padding: "10px 12px",
+                borderRadius: 12,
+                border: "1px solid #eee",
+              }}
+            >
+              {" "}
+              <Upload showUploadList={false} beforeUpload={handleFileSelect}>
+                {" "}
+                <Button
+                  type="text"
+                  shape="circle"
+                  icon={<PaperClipOutlined />}
+                  style={{ marginBottom: 4 }}
+                />{" "}
+              </Upload>{" "}
+              <TextArea
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                placeholder={pendingFile ? "输入分析目标..." : "输入消息..."}
+                autoSize={{ minRows: 1, maxRows: 4 }}
+                bordered={false}
+                style={{ padding: "4px 0", resize: "none" }}
+                onKeyDown={(e) =>
+                  e.key === "Enter" &&
+                  !e.shiftKey &&
+                  (e.preventDefault(), handleSend())
+                }
+              />{" "}
+              <Button
+                type="primary"
+                shape="circle"
+                icon={<SendOutlined />}
+                onClick={handleSend}
+                style={{ marginBottom: 4 }}
+              />{" "}
+            </div>
+          </div>
+        </div>
+
+        {/* Right: Monitor Panel */}
+        <div
+          style={{
+            width: isTaskPanelOpen ? "40%" : 0,
+            opacity: isTaskPanelOpen ? 1 : 0,
+            overflow: "hidden",
+            transition: "all 0.3s cubic-bezier(0.2, 0, 0, 1)",
+            background: "#fcfcfc",
+            borderLeft: "1px solid #e8e8e8",
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
+          <div
+            style={{
+              padding: "16px 20px",
+              borderBottom: "1px solid #eee",
+              background: "#fff",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              flexShrink: 0,
+            }}
+          >
+            {" "}
+            <span
+              style={{
+                fontWeight: 600,
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+              }}
+            >
+              {" "}
+              <FundViewOutlined style={{ color: token.colorPrimary }} />{" "}
+              任务监控{" "}
+            </span>{" "}
+            <Button
+              type="text"
+              icon={<CloseOutlined />}
+              onClick={() => updateState({ isTaskPanelOpen: false })}
+            />{" "}
+          </div>
+
+          <div style={{ flex: 1, padding: "20px", overflowY: "auto" }}>
+            <Card
+              size="small"
+              style={{
+                marginBottom: 20,
+                boxShadow: "0 2px 6px rgba(0,0,0,0.02)",
+                border: "1px solid #f0f0f0",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div
+                  style={{
+                    width: 40,
+                    height: 40,
+                    background: "#fff7e6",
+                    borderRadius: 8,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  {" "}
+                  <FileZipOutlined
+                    style={{ fontSize: 20, color: "#faad14" }}
+                  />{" "}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div
+                    style={{
+                      fontWeight: 600,
+                      display: "flex",
+                      justifyContent: "space-between",
+                    }}
+                  >
+                    <span>{activeApkName || "等待上传..."}</span>
+                    {/* 🔥 进度条显示在这里 */}
+                    {currentPhase === "LOCAL_PREPROCESS" && (
+                      <span style={{ fontSize: 12, color: token.colorPrimary }}>
+                        {Math.floor(progressPercent)}%
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 12, color: "#999" }}>
+                    {" "}
+                    {currentPhase === "IDLE"
+                      ? "未开始"
+                      : currentPhase === "COMPLETED"
+                      ? "分析完成"
+                      : "分析进行中..."}{" "}
+                  </div>
+                  {/* 🔥 进度条组件 */}
+                  {currentPhase === "LOCAL_PREPROCESS" && (
+                    <Progress
+                      percent={progressPercent}
+                      showInfo={false}
+                      strokeColor={token.colorPrimary}
+                      size="small"
+                      status="active"
+                      style={{ marginTop: 8 }}
+                    />
+                  )}
+                </div>
+              </div>
+            </Card>
+
+            <Steps
+              direction="vertical"
+              size="small"
+              current={
+                [
+                  "IDLE",
+                  "LOCAL_PREPROCESS",
+                  "CLOUD_HANDSHAKE",
+                  "ON_DEMAND_ANALYSIS",
+                  "NATIVE_ANALYSIS",
+                  "DYNAMIC_VERIFY",
+                  "COMPLETED",
+                ].indexOf(currentPhase) - 1
+              }
+              style={{ marginBottom: 20, padding: "0 8px" }}
+              items={[
+                { title: "本地预处理", description: "JADX 反编译 & 索引" },
+                { title: "云端握手", description: "Metadata 同步" },
+                { title: "按需分析", description: "Java / Native 语义分析" },
+                { title: "动态验证", description: "Frida 注入 & 对抗" },
+              ]}
+            />
+
+            <div
+              style={{
+                background: "#1e1e1e",
+                borderRadius: 8,
+                padding: "12px",
+                fontFamily: "'Menlo', 'Monaco', 'Courier New', monospace",
+                fontSize: 12,
+                color: "#d4d4d4",
+                height: 350,
+                overflowY: "auto",
+                display: "flex",
+                flexDirection: "column",
+              }}
+            >
+              {logs.length === 0 && (
+                <div style={{ color: "#666" }}>等待任务启动...</div>
+              )}
+              {logs.map((log, idx) => {
+                let color = "#ccc";
+                if (log.source === "Local") color = "#faad14";
+                if (log.source === "Cloud") color = "#1890ff";
+                if (log.source === "Agent") color = "#52c41a";
+                if (log.source === "Device") color = "#eb2f96";
+                if (log.type === "error") color = "#ff4d4f";
+                return (
+                  <div
+                    key={idx}
+                    style={{ marginBottom: 6, wordBreak: "break-all" }}
+                  >
+                    {" "}
+                    <div style={{ color }}>
+                      {" "}
+                      <span style={{ opacity: 0.7, marginRight: 8 }}>
+                        {" "}
+                        [{log.source}]{" "}
+                      </span>{" "}
+                      {log.msg}{" "}
+                    </div>{" "}
+                    {log.codeSnippet && (
+                      <div
+                        style={{
+                          background: "#2d2d2d",
+                          padding: "6px 8px",
+                          borderRadius: 4,
+                          marginTop: 4,
+                          color: "#a9b7c6",
+                          whiteSpace: "pre-wrap",
+                          borderLeft: `2px solid ${color}`,
+                          fontSize: 11,
+                        }}
+                      >
+                        {" "}
+                        {log.codeSnippet}{" "}
+                      </div>
+                    )}{" "}
+                  </div>
+                );
+              })}
+              <div ref={logsEndRef} />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <Modal
+        title={
+          <span>
+            {" "}
+            <WarningOutlined
+              style={{ color: "#faad14", marginRight: 8 }}
+            />{" "}
+            人工辅助请求{" "}
+          </span>
+        }
+        open={isIdaHelpModalOpen}
+        onOk={handleIdaCodeSubmit}
+        onCancel={() => updateState({ isIdaHelpModalOpen: false })}
+        okText="提交代码"
+        cancelText="稍后"
+        width={600}
+        destroyOnClose
+        centered
+      >
+        {" "}
+        <Alert
+          message="检测到复杂混淆 (OLLVM)"
+          description="Agent 无法通过静态文本理解该 Native 函数。请协助：使用 IDA Pro 反编译目标函数，并将 F5 生成的伪代码粘贴在下方。"
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+        />{" "}
+        <div style={{ marginBottom: 8, fontWeight: 500 }}>粘贴 IDA 伪代码:</div>{" "}
+        <TextArea
+          rows={10}
+          value={idaCodeInput}
+          onChange={(e) => updateState({ idaCodeInput: e.target.value })}
+          placeholder="// int __fastcall sub_1234(int a1) { ... }"
+          style={{
+            fontFamily: "monospace",
+            fontSize: 12,
+            background: "#f5f5f5",
+          }}
+        />{" "}
+      </Modal>
     </div>
   );
 };
 
-export default AiChatPage;
+export default AiWorkbenchPage;

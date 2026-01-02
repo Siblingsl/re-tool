@@ -9,7 +9,6 @@ export type ViewMode =
   | "file-manager"
   | "apk-builder"
   | "java-analyzer"
-  | "packer-lab"
   | "network-sniffer"
   | "web-lab"
   | "ai-chat";
