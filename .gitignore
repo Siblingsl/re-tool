@@ -11,7 +11,7 @@ node_modules
 dist
 dist-ssr
 *.local
-
+src-tauri/resources/jadx/lib/*.jar
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
