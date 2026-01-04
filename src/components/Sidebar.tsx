@@ -211,6 +211,33 @@ const Sidebar: React.FC<SidebarProps> = ({
   const [aiConfigForm] = Form.useForm(); // 表单实例
   const aiConfigs = useLiveQuery(() => db.aiConfigs.toArray(), []) || [];
 
+  // ✅ 新增：工作区路径状态
+  const [workspacePath, setWorkspacePath] = useState<string>("");
+
+  // ✅ 新增：初始化时从 localStorage 读取配置
+  useEffect(() => {
+    const savedPath = localStorage.getItem("retool_workspace_path");
+    if (savedPath) setWorkspacePath(savedPath);
+  }, []);
+
+  // ✅ 新增：选择工作区文件夹
+  const handleSelectWorkspace = async () => {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "选择反编译产物存放目录",
+      });
+      if (selected && typeof selected === "string") {
+        setWorkspacePath(selected);
+        localStorage.setItem("retool_workspace_path", selected);
+        message.success("工作区路径已更新");
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   // ✅ 处理：打开添加/编辑弹窗
   const handleOpenAiConfig = (config: any = null) => {
     setEditingConfig(config);
@@ -1915,6 +1942,34 @@ const Sidebar: React.FC<SidebarProps> = ({
                       </Select.Option>
                       <Select.Option value="custom">自定义...</Select.Option>
                     </Select>
+                  </Form.Item>
+
+                  <Divider />
+
+                  <div style={{ fontWeight: 500, marginBottom: 8 }}>
+                    JADX工作区 (Workspace)
+                  </div>
+                  <Form.Item label="">
+                    <div style={{ marginBottom: 24 }}>
+                      <div style={{ display: "flex", gap: 10 }}>
+                        <Input
+                          value={workspacePath}
+                          placeholder="默认存放在下载目录/ReTool_Workspace"
+                          readOnly
+                          prefix={
+                            <FolderOpenOutlined style={{ color: "#999" }} />
+                          }
+                        />
+                        <Button onClick={handleSelectWorkspace}>
+                          更改目录
+                        </Button>
+                      </div>
+                      <div
+                        style={{ fontSize: 12, color: "#999", marginTop: 4 }}
+                      >
+                        反编译后的源码将存放在此目录下，避免污染项目根目录。
+                      </div>
+                    </div>
                   </Form.Item>
                 </Form>
               </div>

@@ -14,14 +14,10 @@ use goblin::elf::Elf;
 // ⚠️ 生产环境请改为云服务器 IP
 const CLOUD_URL: &str = "http://127.0.0.1:3000"; 
 
-// 静态变量：防止 React 的 StrictMode 导致重复连接
 static IS_CONNECTED: AtomicBool = AtomicBool::new(false);
-
-// 使用标准库 Mutex 记录当前的 SessionID
 static CURRENT_SESSION_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 pub fn init(_app_handle: AppHandle) {
-    // 这里的 init 不再自动连接，改为等待前端指令
     println!("[Agent] Init: Waiting for frontend to provide Session ID...");
 }
 
@@ -29,11 +25,20 @@ pub fn init(_app_handle: AppHandle) {
 pub async fn connect_agent(app: AppHandle, session_id: String) -> Result<String, String> {
     println!("[Agent] 🔄 Frontend requested connection for Session ID: {}", session_id);
 
+    let mut current_session = CURRENT_SESSION_ID.lock().unwrap();
+    
+    if let Some(existing_id) = current_session.as_ref() {
+        if existing_id == &session_id && IS_CONNECTED.load(Ordering::SeqCst) {
+            println!("[Agent] ⚠️ Already connected to Session: {}. Skipping.", session_id);
+            return Ok("Already connected".to_string());
+        }
+    }
+
+    *current_session = Some(session_id.clone());
+    
     let handle = app.clone();
     let sid = session_id.clone();
 
-    // 直接启动新线程去连接，不判断旧状态
-    // 注意：rust_socketio 的 client.connect() 是阻塞的，所以必须放在 thread 里
     thread::spawn(move || {
         start_socket_client(handle, sid);
     });
@@ -41,25 +46,84 @@ pub async fn connect_agent(app: AppHandle, session_id: String) -> Result<String,
     Ok(format!("Agent connecting with Session ID: {}", session_id))
 }
 
-// 🔥 修改：接收 session_id 参数，而不是用常量
 fn start_socket_client(app_handle: AppHandle, session_id: String) {
     let url = format!("{}?sessionId={}", CLOUD_URL, session_id);
     println!("[Agent] Connecting to Cloud Brain: {}", url);
 
+    // 克隆多个 handle 给不同的闭包使用
     let open_handle = app_handle.clone();
-    let callback_handle = app_handle.clone();
-    
+    let cmd_handle = app_handle.clone();
+    let stream_handle = app_handle.clone();     // 给 AI 流使用
+    let stream_end_handle = app_handle.clone(); // 给 AI 流结束使用
+    let plan_handle = app_handle.clone();       // ✅ 新增：给任务计划更新使用
+
+    IS_CONNECTED.store(true, Ordering::SeqCst);
+
     let socket_result = ClientBuilder::new(url)
         .transport_type(TransportType::Websocket)
         .on("open", move |_, _| {
             println!("[Agent] ✅ Socket Connection Established!");
-            // 发送事件给前端：告诉它“我连上了，你可以去通知云端了”
+            IS_CONNECTED.store(true, Ordering::SeqCst);
             let _ = open_handle.emit("agent-connected-success", true);
         })
-        .on("close", |_, _| println!("[Agent] ❌ Socket Connection Closed"))
-        .on("error", |err, _| eprintln!("[Agent] ❌ Connection Error: {:#?}", err))
+        .on("close", |_, _| {
+            println!("[Agent] ❌ Socket Connection Closed");
+            IS_CONNECTED.store(false, Ordering::SeqCst);
+        })
+        .on("error", |err, _| {
+            eprintln!("[Agent] ❌ Connection Error: {:#?}", err);
+        })
+        // ========================================================
+        // 监听 AI 流式数据并转发给前端
+        // ========================================================
+        .on("ai_stream_chunk", move |payload: Payload, _| {
+            let chunk_text = match payload {
+                Payload::String(s) => s,
+                Payload::Text(values) => {
+                    if let Some(first_val) = values.first() {
+                        if let Some(s) = first_val.as_str() {
+                            s.to_string()
+                        } else {
+                            first_val.to_string()
+                        }
+                    } else {
+                        String::new()
+                    }
+                },
+                Payload::Binary(b) => String::from_utf8_lossy(&b).to_string(),
+            };
+
+            if !chunk_text.is_empty() {
+                let _ = stream_handle.emit("ai_stream_chunk", chunk_text);
+            }
+        })
+        .on("ai_stream_end", move |_, _| {
+            println!("[Agent] 🏁 AI Stream Finished");
+            let _ = stream_end_handle.emit("ai_stream_end", ()); 
+        })
+        // ========================================================
+        // ✅ 新增：监听动态任务计划并转发给前端
+        // ========================================================
+        .on("agent_task_update", move |payload: Payload, _| {
+            // 解析 Payload
+            let json_str = match payload {
+                Payload::String(s) => s,
+                Payload::Text(values) => {
+                    // 通常是 JSON 数组 [{"id":...}]
+                    if let Some(v) = values.first() { v.to_string() } else { "[]".to_string() }
+                },
+                Payload::Binary(_) => "[]".to_string(),
+            };
+            
+            // 尝试解析为 JSON Value 并转发
+            if let Ok(val) = serde_json::from_str::<Value>(&json_str) {
+                 println!("[Agent] 📅 Received Task Update");
+                 let _ = plan_handle.emit("agent_task_update", val);
+            }
+        })
+        // ========================================================
         .on("agent_command", move |payload: Payload, socket: RawClient| {
-            let handle = callback_handle.clone();
+            let handle = cmd_handle.clone();
             let socket_clone = socket.clone();
 
             println!("[Agent] 📦 Payload Received: {:?}", payload);
@@ -72,7 +136,6 @@ fn start_socket_client(app_handle: AppHandle, session_id: String) {
 
             match serde_json::from_str::<Value>(&data_str) {
                 Ok(json_val) => {
-                    // 兼容 Array 和 Object
                     let cmd_obj_opt = if json_val.is_array() {
                         json_val.as_array().unwrap().iter().find(|v| v.is_object() && v.get("id").is_some())
                     } else if json_val.is_object() {
@@ -109,21 +172,43 @@ fn start_socket_client(app_handle: AppHandle, session_id: String) {
         .connect();
 
     match socket_result {
-        Ok(_) => loop { thread::sleep(Duration::from_secs(10)); },
-        Err(e) => eprintln!("[Agent] Failed to start socket client: {}", e),
+        Ok(_) => {
+            println!("[Agent] Socket client finished.");
+            IS_CONNECTED.store(false, Ordering::SeqCst);
+        }
+        Err(e) => {
+            eprintln!("[Agent] Failed to start socket client: {}", e);
+            IS_CONNECTED.store(false, Ordering::SeqCst);
+        }
     }
 }
 
-// 指令分发器保持不变
+#[tauri::command]
+pub async fn send_chat_message(session_id: String, message: String) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({ 
+        "sessionId": session_id, 
+        "message": message 
+    });
+
+    let res = client.post(format!("{}/api/chat", CLOUD_URL))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if res.status().is_success() {
+        Ok("Sent".to_string())
+    } else {
+        Err(format!("Cloud Error: {}", res.status()))
+    }
+}
+
 async fn dispatch_command(app: &AppHandle, action: &str, params: Value) -> Result<Value, String> {
     match action {
         "GET_FILE_TREE" => {
             let raw_path = params["path"].as_str().ok_or("Missing path")?;
-             
-             // 🔥🔥🔥 关键修复：调用递归扫描，返回 FileNode 结构，而不是 String 列表
-             // 我们复用 apk.rs 中的逻辑，或者在这里重新实现一个干净的版本
              let tree = generate_file_tree(raw_path)?;
-             
              println!("[Agent] Tree generated. Root items: {}", tree.len());
              Ok(json!(tree))
         }
@@ -164,38 +249,41 @@ async fn dispatch_command(app: &AppHandle, action: &str, params: Value) -> Resul
 }
 
 #[tauri::command]
-pub async fn notify_cloud_job_start(session_id: String, file_path: String) -> Result<String, String> {
-    println!("[Agent] 🚀 Local processing finished. Notifying Cloud Brain...");
+pub async fn notify_cloud_job_start(
+    session_id: String, 
+    file_path: String, 
+    instruction: String 
+) -> Result<String, String> {
+    println!("[Agent] 🚀 Notifying Cloud. Instruction: {}", instruction);
+    
     let client = reqwest::Client::new();
-    let body = serde_json::json!({ "sessionId": session_id, "filePath": file_path });
+    let body = serde_json::json!({ 
+        "sessionId": session_id, 
+        "filePath": file_path,
+        "instruction": instruction 
+    });
 
     let res = client.post(format!("{}/api/client-ready", CLOUD_URL))
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Failed to contact cloud: {}", e))?;
+        .map_err(|e| e.to_string())?;
 
     if res.status().is_success() {
-        println!("[Agent] ✅ Cloud Brain activated!");
-        Ok("Cloud task started".to_string())
+        Ok("Started".to_string())
     } else {
-        Err(format!("Cloud returned error: {}", res.status()))
+        Err(format!("Cloud Error: {}", res.status()))
     }
 }
 
-// 辅助函数
-
-// ✅ 新增：专门用于生成标准 FileNode 树的函数
 fn generate_file_tree(path_str: &str) -> Result<Vec<FileNode>, String> {
     let path = Path::new(path_str);
     if !path.exists() {
         return Err(format!("Path not found: {}", path_str));
     }
-    // 调用递归辅助函数
     Ok(read_dir_recursive(path))
 }
 
-// 递归扫描目录，返回 FileNode 结构体
 fn read_dir_recursive(path: &Path) -> Vec<FileNode> {
     let mut nodes = Vec::new();
     if let Ok(entries) = fs::read_dir(path) {
@@ -203,12 +291,10 @@ fn read_dir_recursive(path: &Path) -> Vec<FileNode> {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
 
-            // 过滤隐藏文件
             if name.starts_with(".") { continue; }
 
             let is_dir = path.is_dir();
             
-            // 🔥 修复路径：去掉 Windows 的 \\?\ 前缀，云端看着更舒服
             let mut key_path = path.to_string_lossy().to_string();
             if cfg!(target_os = "windows") {
                 key_path = key_path.replace("\\\\?\\", "");
@@ -218,49 +304,16 @@ fn read_dir_recursive(path: &Path) -> Vec<FileNode> {
                 title: name.clone(),
                 key: key_path,
                 is_leaf: !is_dir,
-                // 如果是目录，递归扫描；如果是文件，children 为 None
                 children: if is_dir { Some(read_dir_recursive(&path)) } else { None },
             };
 
             nodes.push(node);
         }
     }
-    // 排序：文件夹在前
     nodes.sort_by(|a, b| {
         if a.is_leaf == b.is_leaf { a.title.cmp(&b.title) } else { a.is_leaf.cmp(&b.is_leaf) }
     });
     nodes
-}
-
-fn list_files_safe(dir: &str, depth: usize) -> std::io::Result<Vec<String>> {
-    if depth > 5 { return Ok(vec![]); } 
-
-    let mut files = Vec::new();
-    let path = Path::new(dir);
-
-    if let Some(name) = path.file_name() {
-        let name_str = name.to_string_lossy();
-        // 🔥 严格过滤，防止卡死
-        if name_str == "node_modules" || name_str == "target" || name_str == ".git" || name_str == "AppData" || name_str.starts_with('.') {
-            return Ok(files);
-        }
-    }
-
-    if let Ok(entries) = fs::read_dir(path) {
-        for entry in entries {
-            if let Ok(entry) = entry {
-                let path = entry.path();
-                if path.is_file() {
-                    files.push(path.to_string_lossy().to_string());
-                } else if path.is_dir() {
-                    if let Ok(sub_files) = list_files_safe(&path.to_string_lossy(), depth + 1) {
-                        files.extend(sub_files);
-                    }
-                }
-            }
-        }
-    }
-    Ok(files)
 }
 
 fn perform_capstone_disassembly(so_path: &str, target_symbol: &str) -> Result<String, String> {
