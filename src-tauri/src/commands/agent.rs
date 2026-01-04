@@ -2,6 +2,7 @@ use crate::commands;
 use crate::models::FileNode;
 use rust_socketio::{ClientBuilder, Payload, RawClient, TransportType};
 use serde_json::{json, Value};
+use walkdir::WalkDir;
 use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
@@ -10,6 +11,9 @@ use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use goblin::elf::Elf;
+use std::io::{BufRead, BufReader};
+use std::sync::{Arc, Mutex};
+use rayon::prelude::*; // 引入并行迭代器
 
 // ⚠️ 生产环境请改为云服务器 IP
 const CLOUD_URL: &str = "http://127.0.0.1:3000"; 
@@ -19,6 +23,13 @@ static CURRENT_SESSION_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::
 
 pub fn init(_app_handle: AppHandle) {
     println!("[Agent] Init: Waiting for frontend to provide Session ID...");
+}
+
+#[derive(serde::Serialize, Clone)]
+struct SearchResult {
+    file: String,
+    line: usize,
+    content: String,
 }
 
 #[tauri::command]
@@ -244,6 +255,28 @@ async fn dispatch_command(app: &AppHandle, action: &str, params: Value) -> Resul
                 .await.map_err(|e| e.to_string())?;
             Ok(json!(result))
         }
+        // ✅ [新增] 全局代码搜索能力
+        "SEARCH_CODE" => {
+            let root_path = params["rootPath"].as_str().ok_or("Missing rootPath")?;
+            let keyword = params["keyword"].as_str().ok_or("Missing keyword")?;
+            let max_results = params["maxResults"].as_u64().unwrap_or(50) as usize;
+            
+            println!("[Agent] 🔍 Searching for '{}' in {}", keyword, root_path);
+            
+            // 🔥 核心修复：将繁重的搜索任务放入阻塞线程池
+            // 这样主线程依然能响应心跳，不会导致 Timeout
+            let root_path_owned = root_path.to_string();
+            let keyword_owned = keyword.to_string();
+            
+            let results = tokio::task::spawn_blocking(move || {
+                search_files(&root_path_owned, &keyword_owned, max_results)
+            }).await
+            .map_err(|e| format!("Task join error: {}", e))?
+            .map_err(|e| format!("Search error: {}", e))?; // 处理 search_files 的 Result
+
+            println!("[Agent] ✅ Found {} matches", results.len());
+            Ok(json!(results))
+        }
         _ => Err(format!("Unknown action: {}", action)),
     }
 }
@@ -338,4 +371,95 @@ fn perform_capstone_disassembly(so_path: &str, target_symbol: &str) -> Result<St
         asm.push_str(&format!("0x{:x}:  {} {}\n", i.address(), i.mnemonic().unwrap_or(""), i.op_str().unwrap_or("")));
     }
     Ok(asm)
+}
+
+fn search_files(root_dir: &str, keyword: &str, max_limit: usize) -> Result<Vec<SearchResult>, String> {
+    let path = Path::new(root_dir);
+    if !path.exists() {
+        return Err(format!("Path not found: {}", root_dir));
+    }
+
+    let keyword_lower = keyword.to_lowercase();
+    
+    // 1. 快速收集所有待搜索的文件路径
+    // WalkDir 是惰性的，我们先把它 collect 成一个 Vec，方便后面并行处理
+    let entries: Vec<_> = WalkDir::new(root_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        // 简单过滤：只看小于 1MB 的文件，且后缀名匹配
+        .filter(|e| {
+            let p = e.path();
+            if let Ok(meta) = p.metadata() {
+                if meta.len() > 1024 * 1024 { return false; }
+            }
+            is_searchable_ext(p)
+        })
+        .collect();
+
+    println!("[Agent] 🚀 Found {} candidate files. Starting parallel search...", entries.len());
+
+    // 2. 使用 Rayon 进行并行搜索
+    // par_iter() 会自动把任务分发给所有 CPU 核心
+    let results = Arc::new(Mutex::new(Vec::new())); // 线程安全的容器
+    
+    entries.par_iter().for_each(|entry| {
+        // 如果结果已经够了，尽早退出 (Rayon 比较难强行中断，这里是软中断)
+        if let Ok(guard) = results.lock() {
+            if guard.len() >= max_limit { return; }
+        }
+
+        let path = entry.path();
+        if let Ok(content) = fs::read_to_string(path) {
+            // 快速预检
+            if !content.to_lowercase().contains(&keyword_lower) {
+                return;
+            }
+
+            // 逐行匹配
+            for (idx, line) in content.lines().enumerate() {
+                if line.to_lowercase().contains(&keyword_lower) {
+                    let preview = if line.len() > 200 { 
+                        format!("{}...", &line[..200]) 
+                    } else { 
+                        line.to_string() 
+                    };
+                    
+                    // Windows 路径修正
+                    let display_path = path.to_string_lossy().replace("\\", "/");
+
+                    // 写入结果
+                    if let Ok(mut guard) = results.lock() {
+                        if guard.len() < max_limit {
+                            guard.push(SearchResult {
+                                file: display_path,
+                                line: idx + 1,
+                                content: preview.trim().to_string(),
+                            });
+                        }
+                    }
+                    // 只要找到一行就可以跳出当前文件（或者你想找所有行也行）
+                    // 这里为了性能，找到一个文件有匹配就记录（或者记录所有行，看你需求）
+                    // 你的原逻辑是记录所有行，这里保持一致
+                }
+            }
+        }
+    });
+
+    let final_results = results.lock().unwrap().to_vec();
+    println!("[Agent] ✅ Parallel search finished. Found {} matches.", final_results.len());
+    
+    Ok(final_results)
+}
+
+fn is_searchable_ext(path: &Path) -> bool {
+    if let Some(ext) = path.extension() {
+        let ext_str = ext.to_string_lossy().to_lowercase();
+        match ext_str.as_str() {
+            "java" | "xml" | "smali" | "c" | "cpp" | "h" | "kt" | "js" | "json" | "gradle" | "properties" | "txt" => true,
+            _ => false,
+        }
+    } else {
+        false
+    }
 }

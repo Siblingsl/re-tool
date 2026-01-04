@@ -14,7 +14,6 @@ import {
   StopOutlined,
   CaretRightOutlined,
   CheckCircleFilled,
-  SyncOutlined,
   CloseCircleFilled,
   ClockCircleOutlined,
   BulbOutlined,
@@ -35,14 +34,12 @@ import {
   Progress,
   message,
   Collapse,
-  Space,
 } from "antd";
 import { useLiveQuery } from "dexie-react-hooks";
-import { db, ChatMessage, TaskStep } from "@/db"; // 引入新的类型定义
+import { db, ChatMessage, TaskStep } from "@/db";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listen, UnlistenFn } from "@tauri-apps/api/event"; // 引入 UnlistenFn 类型
 import { open } from "@tauri-apps/plugin-dialog";
-import ReactMarkdown from "react-markdown"; // 建议引入 markdown 渲染库，如未安装可暂时用 div
 
 const { TextArea } = Input;
 
@@ -92,81 +89,87 @@ const MessageBubble: React.FC<{ item: ChatMessage; primaryColor: string }> = ({
         style={{
           maxWidth: "85%",
           minWidth: "30%",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: isUser ? "flex-end" : "flex-start",
         }}
       >
         {/* 1. 任务执行计划 (仅 AI 且有步骤时显示) */}
         {!isUser && item.steps && item.steps.length > 0 && (
-          <Card
-            size="small"
-            style={{
-              marginBottom: 8,
-              borderColor: "#e8e8e8",
-              background: "#fafafa",
-            }}
-            styles={{ body: { padding: "12px 16px" } }}
-          >
-            <div style={{ fontSize: 12, color: "#999", marginBottom: 8 }}>
-              ⚡ 执行计划
-            </div>
-            <Steps
-              direction="vertical"
+          <div style={{ width: "100%", marginBottom: 8 }}>
+            <Card
               size="small"
-              current={item.steps.findIndex((s) => s.status === "process")}
-              items={item.steps.map((step) => ({
-                title: step.title,
-                description: step.description,
-                status: step.status as any,
-                icon:
-                  step.status === "process" ? (
-                    <LoadingOutlined />
-                  ) : step.status === "finish" ? (
-                    <CheckCircleFilled />
-                  ) : step.status === "error" ? (
-                    <CloseCircleFilled />
-                  ) : (
-                    <ClockCircleOutlined />
-                  ),
-              }))}
-            />
-          </Card>
+              style={{
+                borderColor: "#e8e8e8",
+                background: "#fafafa",
+              }}
+              styles={{ body: { padding: "12px 16px" } }}
+            >
+              <div style={{ fontSize: 12, color: "#999", marginBottom: 8 }}>
+                ⚡ 执行计划
+              </div>
+              <Steps
+                direction="vertical"
+                size="small"
+                current={item.steps.findIndex((s) => s.status === "process")}
+                items={item.steps.map((step) => ({
+                  title: step.title,
+                  description: step.description,
+                  status: step.status as any,
+                  icon:
+                    step.status === "process" ? (
+                      <LoadingOutlined />
+                    ) : step.status === "finish" ? (
+                      <CheckCircleFilled />
+                    ) : step.status === "error" ? (
+                      <CloseCircleFilled />
+                    ) : (
+                      <ClockCircleOutlined />
+                    ),
+                }))}
+              />
+            </Card>
+          </div>
         )}
 
         {/* 2. 深度思考过程 (类似 DeepSeek 折叠面板) */}
         {!isUser && item.reasoning && (
-          <Collapse
-            ghost
-            size="small"
-            items={[
-              {
-                key: "1",
-                label: (
-                  <span style={{ color: "#888", fontSize: 12 }}>
-                    <BulbOutlined style={{ marginRight: 4 }} /> 深度思考过程
-                  </span>
-                ),
-                children: (
-                  <div
-                    style={{
-                      fontSize: 12,
-                      color: "#666",
-                      borderLeft: "2px solid #ddd",
-                      paddingLeft: 8,
-                      whiteSpace: "pre-wrap",
-                    }}
-                  >
-                    {item.reasoning}
-                  </div>
-                ),
-              },
-            ]}
-            expandIcon={({ isActive }) => (
-              <CaretRightOutlined
-                rotate={isActive ? 90 : 0}
-                style={{ fontSize: 10, color: "#999" }}
-              />
-            )}
-            style={{ marginBottom: 8 }}
-          />
+          <div style={{ width: "100%", marginBottom: 8 }}>
+            <Collapse
+              ghost
+              size="small"
+              items={[
+                {
+                  key: "1",
+                  label: (
+                    <span style={{ color: "#888", fontSize: 12 }}>
+                      <BulbOutlined style={{ marginRight: 4 }} /> 深度思考过程
+                    </span>
+                  ),
+                  children: (
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: "#666",
+                        borderLeft: "2px solid #ddd",
+                        paddingLeft: 8,
+                        whiteSpace: "pre-wrap",
+                        fontFamily: "monospace",
+                      }}
+                    >
+                      {item.reasoning}
+                    </div>
+                  ),
+                },
+              ]}
+              expandIcon={({ isActive }) => (
+                <CaretRightOutlined
+                  rotate={isActive ? 90 : 0}
+                  style={{ fontSize: 10, color: "#999" }}
+                />
+              )}
+            />
+          </div>
         )}
 
         {/* 3. 正文内容 */}
@@ -181,6 +184,7 @@ const MessageBubble: React.FC<{ item: ChatMessage; primaryColor: string }> = ({
             fontSize: 14,
             lineHeight: 1.6,
             boxShadow: "0 1px 2px rgba(0,0,0,0.05)",
+            wordBreak: "break-word",
           }}
         >
           <div style={{ whiteSpace: "pre-wrap" }}>{item.content}</div>
@@ -255,81 +259,88 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
 
   // ========================================================
   // 🎧 全局监听器 (流式响应、思考、任务计划)
+  // 🔥🔥🔥 核心修复：防止 React StrictMode 导致的双重监听 (口吃问题) 🔥🔥🔥
   // ========================================================
   useEffect(() => {
-    let unlistenChunk: () => void;
-    let unlistenReasoning: () => void;
-    let unlistenEnd: () => void;
-    let unlistenPlan: () => void;
+    // 收集所有的 unlisten Promise
+    const unlistenPromises: Promise<UnlistenFn>[] = [];
 
     const setupListeners = async () => {
       // 1. 监听内容块 (Content)
-      unlistenChunk = await listen("ai_stream_chunk", (event: any) => {
-        const chunk = event.payload;
-        if (!currentStreamingMsgId.current) return;
+      unlistenPromises.push(
+        listen("ai_stream_chunk", (event: any) => {
+          const chunk = event.payload;
+          if (!currentStreamingMsgId.current) return;
 
-        streamContentBuffer.current += chunk;
+          streamContentBuffer.current += chunk;
 
-        // 更新数据库 (UI 会自动响应)
-        db.chatMessages.update(currentStreamingMsgId.current, {
-          content: streamContentBuffer.current,
-        });
-      });
-
-      // 2. 监听思考块 (Reasoning - 假设后端会发这个事件，即便没发也不影响)
-      unlistenReasoning = await listen("ai_reasoning_chunk", (event: any) => {
-        const chunk = event.payload;
-        if (!currentStreamingMsgId.current) return;
-
-        streamReasoningBuffer.current += chunk;
-
-        db.chatMessages.update(currentStreamingMsgId.current, {
-          reasoning: streamReasoningBuffer.current,
-        });
-      });
-
-      // 3. 监听任务计划更新 (Task Plan)
-      unlistenPlan = await listen("agent_task_update", (event: any) => {
-        const newSteps = event.payload;
-        if (!currentStreamingMsgId.current) return;
-
-        if (Array.isArray(newSteps)) {
-          currentTaskSteps.current = newSteps;
-          // 将步骤直接存入当前消息体中
-          db.chatMessages.update(currentStreamingMsgId.current, {
-            steps: newSteps,
-          });
-        }
-      });
-
-      // 4. 监听结束信号
-      unlistenEnd = await listen("ai_stream_end", () => {
-        if (currentStreamingMsgId.current) {
-          // 最终确保一致性
+          // 更新数据库 (UI 会自动响应)
           db.chatMessages.update(currentStreamingMsgId.current, {
             content: streamContentBuffer.current,
-            reasoning: streamReasoningBuffer.current,
-            steps: currentTaskSteps.current,
           });
+        })
+      );
 
-          addLog("Agent", "回复生成完毕。", "success");
-          setIsRunning(false);
-        }
-        // 重置 Ref
-        currentStreamingMsgId.current = null;
-        streamContentBuffer.current = "";
-        streamReasoningBuffer.current = "";
-        currentTaskSteps.current = [];
-      });
+      // 2. 监听思考块 (Reasoning)
+      unlistenPromises.push(
+        listen("ai_reasoning_chunk", (event: any) => {
+          const chunk = event.payload;
+          if (!currentStreamingMsgId.current) return;
+
+          streamReasoningBuffer.current += chunk;
+
+          db.chatMessages.update(currentStreamingMsgId.current, {
+            reasoning: streamReasoningBuffer.current,
+          });
+        })
+      );
+
+      // 3. 监听任务计划更新 (Task Plan)
+      unlistenPromises.push(
+        listen("agent_task_update", (event: any) => {
+          const newSteps = event.payload;
+          if (!currentStreamingMsgId.current) return;
+
+          if (Array.isArray(newSteps)) {
+            currentTaskSteps.current = newSteps;
+            // 将步骤直接存入当前消息体中
+            db.chatMessages.update(currentStreamingMsgId.current, {
+              steps: newSteps,
+            });
+          }
+        })
+      );
+
+      // 4. 监听结束信号
+      unlistenPromises.push(
+        listen("ai_stream_end", () => {
+          if (currentStreamingMsgId.current) {
+            // 最终确保一致性
+            db.chatMessages.update(currentStreamingMsgId.current, {
+              content: streamContentBuffer.current,
+              reasoning: streamReasoningBuffer.current,
+              steps: currentTaskSteps.current,
+            });
+
+            addLog("Agent", "回复生成完毕。", "success");
+            setIsRunning(false);
+          }
+          // 重置 Ref
+          currentStreamingMsgId.current = null;
+          streamContentBuffer.current = "";
+          streamReasoningBuffer.current = "";
+          currentTaskSteps.current = [];
+        })
+      );
     };
 
     setupListeners();
 
+    // ✅ 正确的清理逻辑：等待 Promise 解析后调用 unlisten 函数
     return () => {
-      if (unlistenChunk) unlistenChunk();
-      if (unlistenReasoning) unlistenReasoning();
-      if (unlistenEnd) unlistenEnd();
-      if (unlistenPlan) unlistenPlan();
+      unlistenPromises.forEach((p) => {
+        p.then((unlisten) => unlisten());
+      });
     };
   }, []);
 
@@ -353,8 +364,8 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
 
     addLog("Local", `开始处理文件: ${file.name}`, "info");
 
-    let unlistenJadx: () => void = () => {};
-    let unlistenConnect: () => void = () => {};
+    let unlistenJadx: UnlistenFn | undefined;
+    let unlistenConnect: UnlistenFn | undefined;
 
     try {
       // 1. 发送占位消息 (包含初始步骤)
@@ -376,7 +387,7 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
       addLog("Local", "启动 JADX 引擎...", "info");
       const workspacePath = localStorage.getItem("retool_workspace_path");
 
-      // 监听 JADX 进度 (可选：你可以把进度更新到 steps description 里)
+      // 监听 JADX 进度
       unlistenJadx = await listen("jadx-progress-tick", () => {});
 
       const outputDir = await invoke("jadx_decompile", {
@@ -384,7 +395,7 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
         outputDir: workspacePath || null,
       });
 
-      unlistenJadx();
+      if (unlistenJadx) unlistenJadx();
       addLog("Local", `反编译完成`, "success");
 
       // 更新步骤：JADX 完成，云端开始
@@ -417,7 +428,7 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
         });
         invoke("connect_agent", { sessionId }).catch(reject);
       });
-      unlistenConnect();
+      if (unlistenConnect) unlistenConnect();
 
       // 4. 通知云端开始任务
       addLog("Local", `发送指令: ${userInstruction || "默认分析"}`, "info");
@@ -427,7 +438,7 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
         instruction: userInstruction,
       });
     } catch (e) {
-      unlistenJadx();
+      if (unlistenJadx) unlistenJadx();
       if (unlistenConnect) unlistenConnect();
       setIsRunning(false);
       addLog("Local", `处理失败: ${e}`, "error");
@@ -480,7 +491,7 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
         sessionId,
         role: "ai",
         content: "",
-        reasoning: "", // 预留
+        reasoning: "",
         time: new Date().toLocaleTimeString(),
       });
       currentStreamingMsgId.current = aiMsgId;
@@ -500,10 +511,6 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
   };
 
   const handleStop = async () => {
-    // 这里的停止目前只是前端断开监听，并重置 UI 状态
-    // 理想情况下，应该发一个 cancel_task 指令给后端
-    // await invoke("cancel_task", { sessionId });
-
     message.info("已停止接收");
     setIsRunning(false);
     currentStreamingMsgId.current = null;
