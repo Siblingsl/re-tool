@@ -1,5 +1,6 @@
 use crate::commands;
 use crate::models::FileNode;
+use regex::Regex;
 use rust_socketio::{ClientBuilder, Payload, RawClient, TransportType};
 use serde_json::{json, Value};
 use walkdir::WalkDir;
@@ -277,6 +278,24 @@ async fn dispatch_command(app: &AppHandle, action: &str, params: Value) -> Resul
             println!("[Agent] ✅ Found {} matches", results.len());
             Ok(json!(results))
         }
+        // ✅ [新增] 精准切片能力
+        "GET_METHOD" => {
+            let file_path = params["path"].as_str().ok_or("Missing path")?;
+            let method_name = params["method"].as_str().ok_or("Missing method")?;
+            
+            println!("[Agent] ✂️ Slicing method '{}' from {}", method_name, file_path);
+            
+            // 同样放入 blocking 线程防止卡死
+            let f_path = file_path.to_string();
+            let m_name = method_name.to_string();
+            
+            let code_block = tokio::task::spawn_blocking(move || {
+                extract_method_body(&f_path, &m_name)
+            }).await.map_err(|e| e.to_string())??;
+            
+            println!("[Agent] ✅ Extracted {} chars", code_block.len());
+            Ok(json!(code_block))
+        }
         _ => Err(format!("Unknown action: {}", action)),
     }
 }
@@ -446,7 +465,10 @@ fn search_files(root_dir: &str, keyword: &str, max_limit: usize) -> Result<Vec<S
         }
     });
 
-    let final_results = results.lock().unwrap().to_vec();
+    let mut final_results = results.lock().unwrap().to_vec();
+    // 按路径长度排序（通常用户源码路径短，生成的缓存路径长）或者按字母排序
+    final_results.sort_by(|a, b| a.file.cmp(&b.file)); 
+
     println!("[Agent] ✅ Parallel search finished. Found {} matches.", final_results.len());
     
     Ok(final_results)
@@ -462,4 +484,66 @@ fn is_searchable_ext(path: &Path) -> bool {
     } else {
         false
     }
+}
+
+
+// 🔥🔥🔥 核心：基于花括号计数的代码切片器 🔥🔥🔥
+fn extract_method_body(file_path: &str, method_name: &str) -> Result<String, String> {
+    let content = fs::read_to_string(file_path).map_err(|e| format!("Read error: {}", e))?;
+    let lines: Vec<&str> = content.lines().collect();
+
+    // 1. 构建宽松的正则来匹配方法签名
+    // 匹配规则：空白 + (public/private/...) + 空白 + 返回值 + 空白 + 方法名 + 空白 + (
+    // 这种正则能覆盖大多数 Java/Kotlin 定义
+    let pattern = format!(r"(?i)\b{}\s*\(", regex::escape(method_name));
+    let re = Regex::new(&pattern).map_err(|e| e.to_string())?;
+
+    let mut start_line_idx = None;
+
+    // 2. 找到方法定义的起始行
+    for (i, line) in lines.iter().enumerate() {
+        if re.is_match(line) {
+            start_line_idx = Some(i);
+            break;
+        }
+    }
+
+    let start_idx = match start_line_idx {
+        Some(idx) => idx,
+        None => return Err(format!("Method '{}' not found in file", method_name)),
+    };
+
+    // 3. 开始花括号计数 (Brace Counting Algorithm)
+    let mut brace_balance = 0;
+    let mut found_start_brace = false;
+    let mut extracted_lines = Vec::new();
+
+    // 从签名行开始往下读
+    for i in start_idx..lines.len() {
+        let line = lines[i];
+        extracted_lines.push(line);
+
+        // 简单的字符遍历计数
+        for char in line.chars() {
+            match char {
+                '{' => {
+                    brace_balance += 1;
+                    found_start_brace = true;
+                }
+                '}' => {
+                    brace_balance -= 1;
+                }
+                _ => {}
+            }
+        }
+
+        // 终止条件：已经找到了开始的 {，并且计数器回到了 0
+        // 这意味着我们刚好闭合了该方法
+        if found_start_brace && brace_balance == 0 {
+            break;
+        }
+    }
+
+    // 4. 返回结果
+    Ok(extracted_lines.join("\n"))
 }
