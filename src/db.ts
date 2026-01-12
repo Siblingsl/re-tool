@@ -37,17 +37,63 @@ export interface AiConfig {
   isActive: boolean;
 }
 
+export interface SessionLog {
+  id?: number;
+  sessionId: string;
+  source: "Local" | "Device" | "Agent" | "Cloud";
+  msg: string;
+  type: "info" | "success" | "warning" | "error";
+  isKeyResult?: boolean;
+  time?: number; // timestamp
+}
+
+export interface NetworkCapture {
+  id: string; // uuid
+  sessionId: string;
+  method: string;
+  url: string;
+  host: string;
+  path: string;
+  status?: number;
+  duration?: number;
+  requestHeaders: Record<string, string>;
+  responseHeaders?: Record<string, string>;
+  requestBody?: string;
+  responseBody?: string;
+  timestamp: number;
+}
+
 class MyAppDatabase extends Dexie {
   chatSessions!: Table<ChatSession>;
   chatMessages!: Table<ChatMessage>;
   aiConfigs!: Table<AiConfig>;
+  sessionLogs!: Table<SessionLog>;
+  networkCaptures!: Table<NetworkCapture>; // 🔥 新增
 
   constructor() {
     super("ReverseWorkbenchDB");
+    // Version 3 (Old)
     this.version(3).stores({
       chatSessions: "id, lastUpdated",
       chatMessages: "++id, sessionId",
       aiConfigs: "++id, isActive",
+    });
+
+    // Version 4 (New - Logs)
+    this.version(4).stores({
+      chatSessions: "id, lastUpdated",
+      chatMessages: "++id, sessionId",
+      aiConfigs: "++id, isActive",
+      sessionLogs: "++id, sessionId",
+    });
+
+    // Version 5 (New - Network)
+    this.version(5).stores({
+      chatSessions: "id, lastUpdated",
+      chatMessages: "++id, sessionId",
+      aiConfigs: "++id, isActive",
+      sessionLogs: "++id, sessionId",
+      networkCaptures: "id, sessionId", // 使用 UUID 作为主键
     });
   }
 }

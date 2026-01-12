@@ -1,5 +1,6 @@
-use crate::commands;
+use crate::commands::{self, frida};
 use crate::models::FileNode;
+use std::path::PathBuf;
 use regex::Regex;
 use rust_socketio::{ClientBuilder, Payload, RawClient, TransportType};
 use serde_json::{json, Value};
@@ -15,12 +16,24 @@ use goblin::elf::Elf;
 use std::io::{BufRead, BufReader};
 use std::sync::{Arc, Mutex};
 use rayon::prelude::*; // 引入并行迭代器
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelConfig {
+    pub provider: Option<String>,
+    pub apiKey: Option<String>,
+    pub baseURL: Option<String>,
+    pub model: Option<String>,
+    pub temperature: Option<f64>,
+    pub maxTokens: Option<i32>,
+}
 
 // ⚠️ 生产环境请改为云服务器 IP
 const CLOUD_URL: &str = "http://127.0.0.1:3000"; 
 
 static IS_CONNECTED: AtomicBool = AtomicBool::new(false);
 static CURRENT_SESSION_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static CURRENT_PROJECT_ROOT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 pub fn init(_app_handle: AppHandle) {
     println!("[Agent] Init: Waiting for frontend to provide Session ID...");
@@ -196,11 +209,16 @@ fn start_socket_client(app_handle: AppHandle, session_id: String) {
 }
 
 #[tauri::command]
-pub async fn send_chat_message(session_id: String, message: String) -> Result<String, String> {
+pub async fn send_chat_message(
+    session_id: String, 
+    message: String,
+    model_config: Option<ModelConfig>
+) -> Result<String, String> {
     let client = reqwest::Client::new();
     let body = serde_json::json!({ 
         "sessionId": session_id, 
-        "message": message 
+        "message": message,
+        "modelConfig": model_config
     });
 
     let res = client.post(format!("{}/api/chat", CLOUD_URL))
@@ -217,6 +235,14 @@ pub async fn send_chat_message(session_id: String, message: String) -> Result<St
 }
 
 async fn dispatch_command(app: &AppHandle, action: &str, params: Value) -> Result<Value, String> {
+    let project_root = CURRENT_PROJECT_ROOT.lock().unwrap().clone()
+        .ok_or("No active project loaded. Please start a task first.")?;
+    
+    // 辅助函数：将相对路径转为绝对路径
+    let resolve_path = |rel_path: &str| -> String {
+        let p = std::path::Path::new(&project_root).join(rel_path);
+        p.to_string_lossy().to_string()
+    };
     match action {
         "GET_FILE_TREE" => {
             let raw_path = params["path"].as_str().ok_or("Missing path")?;
@@ -225,10 +251,34 @@ async fn dispatch_command(app: &AppHandle, action: &str, params: Value) -> Resul
              Ok(json!(tree))
         }
         "READ_FILE" => {
-            let path = params["path"].as_str().ok_or("Missing path")?;
-            println!("[Agent] Reading file: {}", path);
-            let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
+            let rel_path = params["path"].as_str().ok_or("Missing path")?;
+            // ✅ 修正：拼接绝对路径
+            let full_path = resolve_path(rel_path); 
+            println!("[Agent] Reading file: {}", full_path);
+            let content = fs::read_to_string(full_path).map_err(|e| e.to_string())?;
             Ok(json!(content))
+        }
+        // ✅ [新增] 获取文件大纲 (节省 Token)
+        "GET_FILE_STRUCTURE" => {
+            // 1. 从 params 获取相对路径 (这里是 &str，借用的)
+            let rel_path = params["path"].as_str().ok_or("Missing path")?;
+            
+            // 2. 解析为绝对路径 (这里返回的是 String，拥有的！)
+            let full_path = resolve_path(rel_path);
+            
+            println!("[Agent] 🦴 Generating outline for: {}", full_path);
+            
+            // 3. 【关键】将 full_path 的所有权转移给新变量 f_path
+            // 这样 f_path 就是一个独立的 String，和 params 彻底脱钩
+            let f_path = full_path;
+            
+            let outline = tokio::task::spawn_blocking(move || {
+                // 4. 在闭包内部使用 f_path
+                // move 关键字已经把 f_path 移进来了，它现在归这个线程所有
+                generate_source_outline(&f_path)
+            }).await.map_err(|e| e.to_string())??;
+            
+            Ok(json!(outline))
         }
         "GET_ASM" => {
             let lib_path = params["libPath"].as_str().ok_or("Missing libPath")?;
@@ -258,15 +308,20 @@ async fn dispatch_command(app: &AppHandle, action: &str, params: Value) -> Resul
         }
         // ✅ [新增] 全局代码搜索能力
         "SEARCH_CODE" => {
-            let root_path = params["rootPath"].as_str().ok_or("Missing rootPath")?;
+            let req_root = params["rootPath"].as_str().ok_or("Missing rootPath")?;
+            let search_root = if req_root == "." {
+                project_root.clone()
+            } else {
+                resolve_path(req_root)
+            };
             let keyword = params["keyword"].as_str().ok_or("Missing keyword")?;
             let max_results = params["maxResults"].as_u64().unwrap_or(50) as usize;
             
-            println!("[Agent] 🔍 Searching for '{}' in {}", keyword, root_path);
+            println!("[Agent] 🔍 Searching for '{}' in {}", keyword, search_root);
             
             // 🔥 核心修复：将繁重的搜索任务放入阻塞线程池
             // 这样主线程依然能响应心跳，不会导致 Timeout
-            let root_path_owned = root_path.to_string();
+            let root_path_owned = search_root;
             let keyword_owned = keyword.to_string();
             
             let results = tokio::task::spawn_blocking(move || {
@@ -278,24 +333,70 @@ async fn dispatch_command(app: &AppHandle, action: &str, params: Value) -> Resul
             println!("[Agent] ✅ Found {} matches", results.len());
             Ok(json!(results))
         }
+        // ✅ [新增] 按文件名查找 (相当于 find /dir -name "*keyword*")
+        "FIND_FILES" => {
+            let root_path = params["rootPath"].as_str().ok_or("Missing rootPath")?;
+            let keyword = params["keyword"].as_str().ok_or("Missing keyword")?;
+            
+            println!("[Agent] 🔍 Finding files with name containing '{}'", keyword);
+            
+            let root_path_owned = root_path.to_string();
+            let keyword_owned = keyword.to_string();
+
+            let files = tokio::task::spawn_blocking(move || {
+                let mut matches = Vec::new();
+                for entry in WalkDir::new(&root_path_owned).into_iter().filter_map(|e| e.ok()) {
+                    let file_name = entry.file_name().to_string_lossy();
+                    // 忽略大小写匹配文件名
+                    if file_name.to_lowercase().contains(&keyword_owned.to_lowercase()) {
+                        let full_path = entry.path().to_string_lossy().replace("\\", "/");
+                        matches.push(full_path);
+                    }
+                }
+                matches
+            }).await.map_err(|e| e.to_string())?;
+
+            println!("[Agent] ✅ Found {} files", files.len());
+            Ok(json!(files))
+        },
         // ✅ [新增] 精准切片能力
         "GET_METHOD" => {
-            let file_path = params["path"].as_str().ok_or("Missing path")?;
+            let rel_path = params["path"].as_str().ok_or("Missing path")?;
+            // 1. 获取绝对路径 (String)
+            let full_path = resolve_path(rel_path); 
+            // 2. 获取方法名 (借用的 &str)
             let method_name = params["method"].as_str().ok_or("Missing method")?;
             
-            println!("[Agent] ✂️ Slicing method '{}' from {}", method_name, file_path);
+            // 这里打印依然可以用 full_path，因为它还没有被 move
+            println!("[Agent] ✂️ Slicing method '{}' from {}", method_name, full_path);
             
-            // 同样放入 blocking 线程防止卡死
-            let f_path = file_path.to_string();
+            // 3. 准备所有权数据 (Owned Data) 以便 Move 进线程
+            // f_path 直接拿走 full_path 的所有权
+            let f_path = full_path;
+            // m_name 必须从引用转为拥有所有权的 String
             let m_name = method_name.to_string();
             
             let code_block = tokio::task::spawn_blocking(move || {
+                // 🔥 关键修改：这里必须使用移进来后的新变量名 (f_path, m_name)
+                // 绝对不能再用外面的 full_path 或 method_name
                 extract_method_body(&f_path, &m_name)
             }).await.map_err(|e| e.to_string())??;
             
-            println!("[Agent] ✅ Extracted {} chars", code_block.len());
             Ok(json!(code_block))
         }
+        // ✅ [新增] 列出 Native 导出函数
+        "LIST_NATIVE_EXPORTS" => {
+            let path = params["path"].as_str().ok_or("Missing path")?;
+            println!("[Agent] 🧱 Analyzing Native Library: {}", path);
+
+            let path_owned = path.to_string();
+            let exports = tokio::task::spawn_blocking(move || {
+                get_native_exports(&path_owned)
+            }).await.map_err(|e| e.to_string())??;
+
+            println!("[Agent] ✅ Found {} exported symbols", exports.len());
+            Ok(json!(exports))
+        },
         _ => Err(format!("Unknown action: {}", action)),
     }
 }
@@ -304,15 +405,56 @@ async fn dispatch_command(app: &AppHandle, action: &str, params: Value) -> Resul
 pub async fn notify_cloud_job_start(
     session_id: String, 
     file_path: String, 
-    instruction: String 
+    instruction: String,
+    model_config: Option<ModelConfig>,
+    manifest: Option<String>,    // 🔥 New
+    file_tree: Option<Vec<FileNode>>   // 🔥 New
 ) -> Result<String, String> {
     println!("[Agent] 🚀 Notifying Cloud. Instruction: {}", instruction);
+
+    let package_name = manifest.as_ref()
+        .and_then(|xml| {
+            let re = Regex::new(r#"package=["']([^"']+)["']"#).ok()?;
+            re.captures(xml).and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+        })
+        .unwrap_or_else(|| "unknown.package".to_string());
+
+    {
+        let mut root = CURRENT_PROJECT_ROOT.lock().unwrap();
+        *root = Some(file_path.clone());
+        println!("[Agent] 📂 Project Root set to: {}", file_path);
+    }
+
+    // 2. 🔥 核心修改：拍平文件树
+    let flat_file_list: Vec<String> = if let Some(nodes) = file_tree {
+        let list = flatten_file_tree(&nodes);
+        println!("[Agent] 🌲 Flattened file tree: {} files -> {} paths", nodes.len(), list.len());
+        list
+    } else {
+        Vec::new()
+    };
+
+    let root_prefix = file_path.clone(); // file_path 是解包后的根目录
+
+    let refined_list: Vec<String> = flat_file_list.into_iter().map(|path| {
+        // 移除根路径前缀，并将反斜杠转为斜杠 (AI 更喜欢 Unix 风格)
+        path.replace(&root_prefix, "")
+            .replace("\\", "/")
+            .trim_start_matches('/')
+            .to_string()
+    }).collect();
     
     let client = reqwest::Client::new();
     let body = serde_json::json!({ 
         "sessionId": session_id, 
-        "filePath": file_path,
-        "instruction": instruction 
+        "filePath": file_path,  // 🔥 修复：添加 filePath 参数
+        "instruction": instruction,
+        "modelConfig": model_config,
+        "projectInfo": {
+            "packageName": package_name,
+            "manifestXml": manifest.unwrap_or_default(),
+            "fileTree": refined_list
+        }
     });
 
     let res = client.post(format!("{}/api/client-ready", CLOUD_URL))
@@ -343,7 +485,14 @@ fn read_dir_recursive(path: &Path) -> Vec<FileNode> {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
 
+            // 基础过滤：隐藏文件
             if name.starts_with(".") { continue; }
+
+            // 🔥 [新增] 智能过滤：跳过垃圾目录
+            if is_ignored_entry(&name, &path) {
+                // println!("Skipping ignored path: {:?}", path); // 调试时可开启
+                continue;
+            }
 
             let is_dir = path.is_dir();
             
@@ -359,13 +508,118 @@ fn read_dir_recursive(path: &Path) -> Vec<FileNode> {
                 children: if is_dir { Some(read_dir_recursive(&path)) } else { None },
             };
 
+            // 优化：如果是空目录（被过滤完了），就不添加了
+            if is_dir {
+                if let Some(children) = &node.children {
+                    if children.is_empty() {
+                        continue;
+                    }
+                }
+            }
+
             nodes.push(node);
         }
     }
+    // 排序
     nodes.sort_by(|a, b| {
         if a.is_leaf == b.is_leaf { a.title.cmp(&b.title) } else { a.is_leaf.cmp(&b.is_leaf) }
     });
     nodes
+}
+
+fn is_ignored_entry(name: &str, path: &Path) -> bool {
+    // 1. 忽略常见的非代码资源目录
+    let ignore_dirs = [
+        "res", "assets", "resources", "build", "dist", "release", "debug", 
+        "kotlin", "kotlinx", "javax", "org", "net", "io" // 视情况过滤顶级包名
+    ];
+    if ignore_dirs.contains(&name) {
+        return true;
+    }
+
+    // 2. 忽略常见的第三方 SDK 包名 (路径匹配)
+    // 转换路径为字符串，注意 Windows 的反斜杠问题
+    let path_str = path.to_string_lossy().replace("\\", "/");
+    
+    // 常见的垃圾代码路径特征
+    let junk_patterns = [
+        // === Android & Google 系统级 ===
+        "/androidx/",
+        "/android/support/",
+        "/android/arch/",
+        "/com/google/",          // Google GMS, Firebase, Gson, Guava
+        "/com/android/",
+        
+        // === 语言与核心库 ===
+        "/kotlin/",              // Kotlin 标准库
+        "/kotlinx/",             // Kotlin 协程等
+        "/org/jetbrains/",       // JetBrains 内部库
+        "/org/intellij/",
+        "/org/apache/",          // Apache Commons (IO, Http, etc.)
+        "/io/reactivex/",        // RxJava
+        "/javax/",               // Java 标准扩展
+        "/org/json/",            // 标准 JSON 库
+
+        // === 常见网络与工具库 ===
+        "/okhttp3/",             // OkHttp
+        "/okio/",                // Okio
+        "/retrofit2/",           // Retrofit
+        "/com/squareup/",        // Square (OkHttp, Retrofit, LeakCanary, Picasso)
+        "/com/bumptech/",        // Glide 图片加载
+        "/com/fasterxml/",       // Jackson JSON
+        "/com/gson/",            // Gson (有时会有变体)
+        "/org/jsoup/",           // Jsoup HTML 解析
+        "/com/airbnb/",          // Lottie 动画
+        "/dagger/",              // Dagger 依赖注入
+        "/org/greenrobot/",      // EventBus, GreenDao
+
+        // === 国内大厂与常见 SDK (重点) ===
+        "/com/alibaba/",         // 阿里系 (支付宝, ARouter, FastJson)
+        "/com/alipay/",          // 支付宝 SDK
+        "/com/taobao/",          // 淘宝 SDK
+        "/com/tencent/",         // 腾讯系 (微信, Bugly, X5内核, Taker)
+        "/com/mm/",              // 微信相关
+        "/com/baidu/",           // 百度 (地图, 定位, 统计)
+        "/com/amap/",            // 高德地图
+        "/com/autonavi/",        // 高德导航
+        "/com/sina/",            // 新浪微博 SDK
+        "/com/meizu/",           // 魅族 Push
+        "/com/xiaomi/",          // 小米 Push
+        "/com/huawei/",          // 华为 HMS/Push
+        "/com/vivo/",            // Vivo Push
+        "/com/oppo/",            // Oppo Push
+        "/com/heytap/",          // ColorOS (Oppo) Push
+        "/com/umeng/",           // 友盟统计 (非常常见)
+        "/com/igexin/",          // 个推 Push
+        "/cn/jpush/",            // 极光推送
+        "/cn/jiguang/",          // 极光核心
+        "/com/bytedance/",       // 字节跳动 (穿山甲广告, TikTok SDK)
+        "/com/ss/android/",      // 字节跳动 (今日头条 SDK)
+        "/com/unionpay/",        // 银联支付
+        "/com/jd/",              // 京东 SDK
+        "/com/kuaishou/",        // 快手 SDK
+
+        // === 跨平台框架 ===
+        "/com/facebook/",        // Facebook (React Native, Fresco, Soloader)
+        "/io/flutter/",          // Flutter 引擎
+        "/com/unity3d/",         // Unity 引擎
+        "/org/cocos2dx/",        // Cocos 引擎
+        
+        // === 生成文件与资源 ===
+        "/R.java",               // 资源索引 (垃圾中的战斗机)
+        "/R$.java",              // R 的内部类
+        "/BuildConfig.java",     // 编译配置
+        "/Manifest.java",        // 有时会生成的 Manifest 索引
+        "/DebugMetadata.java",   // 调试元数据
+    ];
+
+    for pattern in junk_patterns.iter() {
+        if path_str.contains(pattern) {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn perform_capstone_disassembly(so_path: &str, target_symbol: &str) -> Result<String, String> {
@@ -490,6 +744,9 @@ fn is_searchable_ext(path: &Path) -> bool {
 // 🔥🔥🔥 核心：基于花括号计数的代码切片器 🔥🔥🔥
 fn extract_method_body(file_path: &str, method_name: &str) -> Result<String, String> {
     let content = fs::read_to_string(file_path).map_err(|e| format!("Read error: {}", e))?;
+    if file_path.ends_with(".smali") {
+        return extract_smali_method(&content, method_name);
+    }
     let lines: Vec<&str> = content.lines().collect();
 
     // 1. 构建宽松的正则来匹配方法签名
@@ -546,4 +803,154 @@ fn extract_method_body(file_path: &str, method_name: &str) -> Result<String, Str
 
     // 4. 返回结果
     Ok(extracted_lines.join("\n"))
+}
+
+// 新增 Smali 提取逻辑
+fn extract_smali_method(content: &str, method_name: &str) -> Result<String, String> {
+    let mut in_method = false;
+    let mut extracted_lines = Vec::new();
+    
+    // 简单的 Smali 匹配： .method ... methodName(
+    let start_pattern = format!(" {}(", method_name); 
+
+    for line in content.lines() {
+        if line.contains(".method") && line.contains(&start_pattern) {
+            in_method = true;
+        }
+
+        if in_method {
+            extracted_lines.push(line);
+            if line.trim().starts_with(".end method") {
+                break;
+            }
+        }
+    }
+
+    if extracted_lines.is_empty() {
+        return Err(format!("Smali method '{}' not found", method_name));
+    }
+
+    Ok(extracted_lines.join("\n"))
+}
+
+// 🔥🔥🔥 核心：解析 ELF (.so) 导出表 🔥🔥🔥
+fn get_native_exports(file_path: &str) -> Result<Vec<String>, String> {
+    let path = Path::new(file_path);
+    if !path.exists() {
+        return Err(format!("File not found: {}", file_path));
+    }
+
+    let buffer = fs::read(path).map_err(|e| format!("Read error: {}", e))?;
+
+    // 解析 ELF
+    match Elf::parse(&buffer) {
+        Ok(binary) => {
+            let mut exports = Vec::new();
+
+            // 遍历动态符号表 (dynsyms)
+            for sym in binary.dynsyms.iter() {
+                // st_value > 0 通常意味着它是定义的函数/变量，而不是引用的外部符号
+                // st_info 包含了类型信息，我们主要关注函数 (STT_FUNC) 和 GNU_IFUNC
+                // 但为了通用性，只要是有名字且有地址的导出符号，我们都列出来
+                if sym.st_value == 0 || sym.st_shndx == 0 { continue; }
+
+                if let Some(name) = binary.dynstrtab.get_at(sym.st_name) {
+                    // 过滤掉一些系统符号，只保留看起来像业务逻辑的
+                    if !name.is_empty() && !name.starts_with("_") {
+                        exports.push(name.to_string());
+                    }
+                    // 特别保留 JNI 函数 (Java_...)
+                    else if name.starts_with("Java_") {
+                        exports.push(name.to_string());
+                    }
+                }
+            }
+
+            // 排序，方便查看
+            exports.sort();
+            Ok(exports)
+        },
+        Err(e) => Err(format!("Failed to parse ELF: {}", e))
+    }
+}
+
+
+fn flatten_file_tree(nodes: &[FileNode]) -> Vec<String> {
+    let mut paths = Vec::new();
+    
+    for node in nodes {
+        if node.is_leaf {
+            // 这里直接使用 node.key (通常是完整路径)
+            // 💡 进阶优化：如果 key 是绝对路径，建议在这里转成相对路径 (相对于项目根目录)
+            // 比如: "C:\\Users\\...\\src\\main.java" -> "src/main.java"
+            // 但为了保险起见，先传完整路径，云端也能处理
+            paths.push(node.key.clone());
+        }
+        
+        if let Some(children) = &node.children {
+            let child_paths = flatten_file_tree(children);
+            paths.extend(child_paths);
+        }
+    }
+    
+    paths
+}
+
+// 🔥🔥🔥 核心：代码大纲生成器 (Outline Generator) 🔥🔥🔥
+// 改进版：支持“透视”模式，保留方法体内的字符串和敏感 API 调用
+fn generate_source_outline(file_path: &str) -> Result<String, String> {
+    let content = fs::read_to_string(file_path).map_err(|e| format!("Read error: {}", e))?;
+    let mut outline_lines = Vec::new();
+    let mut brace_level = 0;
+    
+    // 敏感关键词列表 (即使在方法体内，遇到这些词也要保留)
+    let sensitive_keywords = [
+        "\"", "'", // 字符串常量
+        "SecretKey", "Cipher", "MessageDigest", "Mac", "Signature", // 加密相关
+        "Http", "Retrofit", "OkHttp", "Socket", // 网络
+        "loadLibrary", "native", // JNI
+        "SharedPreferences", "SQLite", // 存储
+        "Log.", "System.out", // 日志
+        "Base64", "MD5", "SHA", "AES", "DES", "RSA" // 常见算法字符串
+    ];
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() { continue; }
+
+        let open_count = line.chars().filter(|c| *c == '{').count();
+        let close_count = line.chars().filter(|c| *c == '}').count();
+        
+        // 判定规则 1: 结构行 (类定义、方法签名、闭合括号)
+        let is_structure = brace_level <= 1 || (brace_level == 2 && close_count > 0);
+        
+        // 判定规则 2: 特征行 (包含敏感信息)
+        // 只有当这一行看起来像代码 (不是纯注释) 时才检查
+        let is_feature = !trimmed.starts_with("//") && sensitive_keywords.iter().any(|&kw| line.contains(kw));
+
+        if is_structure || is_feature {
+            // 如果是结构行，且后面紧跟了内容，我们手动截断视觉效果
+            if is_structure && open_count > 0 && brace_level >= 1 && !is_feature {
+                 outline_lines.push(line.to_string());
+                 // 只有当没有被认定为 feature 时，才加 ... 提示
+                 // 如果这一行本身就是 feature (比如定义时就有字符串)，则不需要 ...
+                 if brace_level >= 1 {
+                     let indent = &line[0..line.len() - line.trim_start().len()];
+                     outline_lines.push(format!("{}    // ...", indent)); 
+                 }
+            } else {
+                outline_lines.push(line.to_string());
+            }
+        }
+
+        // 更新层级
+        brace_level = brace_level + open_count;
+        if brace_level >= close_count {
+            brace_level -= close_count;
+        } else {
+            brace_level = 0; 
+        }
+    }
+
+    Ok(outline_lines.join("\n"))
 }

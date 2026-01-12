@@ -17,6 +17,7 @@ import {
   CloseCircleFilled,
   ClockCircleOutlined,
   BulbOutlined,
+  SettingOutlined,
 } from "@ant-design/icons";
 import {
   Input,
@@ -34,12 +35,16 @@ import {
   Progress,
   message,
   Collapse,
+  Select,
+  Form,
+  InputNumber,
 } from "antd";
 import { useLiveQuery } from "dexie-react-hooks";
 import { db, ChatMessage, TaskStep } from "@/db";
 import { invoke } from "@tauri-apps/api/core";
-import { listen, UnlistenFn } from "@tauri-apps/api/event"; // 引入 UnlistenFn 类型
+import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { NetworkRequest } from "@/types";
 
 const { TextArea } = Input;
 
@@ -48,11 +53,105 @@ interface LogEntry {
   msg: string;
   codeSnippet?: string;
   type?: "info" | "success" | "warning" | "error";
+  isKeyResult?: boolean; // 🔥 标记是否为关键结果日志
 }
+
+// 🔥 判断日志是否为关键结果的函数
+const isKeyResultLog = (msg: string): boolean => {
+  const keyPatterns = [
+    // 原有规则
+    /\[Digest\].*Result:/i,
+    /\[HMAC\].*Result:/i,
+    /\[HMAC\].*Key:/i,
+    /\[Sign\].*Result:/i,
+    /\[Cipher\].*ENCRYPT/i,
+    /\[Cipher\].*DECRYPT/i,
+    /\[HTTP\].*🔐/,
+    /\[FormBody\].*🔐/,
+    /sign.*=/i,
+    /密钥|密码|token|secret/i,
+    /Stack:/i,
+    // 🔥 新增：高级签名追踪规则
+    /\[🔑签名结果\]/,
+    /\[🔑签名输入\]/,
+    /\[🔑签名密钥\]/,
+    /\[🔑Sign字段\]/,
+    /\[🔑匹配成功\]/,
+    /\[🔑返回值\]/,
+    /═══════/,  // 分隔线
+  ];
+  return keyPatterns.some(pattern => pattern.test(msg));
+};
+
+// 🔥 签名捕获数据结构
+interface SignCapture {
+  id: string;
+  timestamp: number;
+  type: "HMAC" | "MD5" | "SHA1" | "HTTP";
+  algo?: string;
+  result: string;          // 签名结果
+  input?: string;          // 输入参数
+  key?: string;            // 密钥
+  sourceClass?: string;    // 来源类
+  url?: string;            // HTTP URL
+  matched?: boolean;       // 是否匹配成功
+}
+
+// 🔥 从日志解析签名信息
+const parseSignatureFromLog = (msg: string): SignCapture | null => {
+  // 解析 HMAC/MD5 结果
+  if (msg.includes("[🔑签名结果]")) {
+    const resultMatch = msg.match(/Result:\s*([a-f0-9]+)/i);
+    const algoMatch = msg.match(/HMAC-(\w+)|(MD5|SHA1|SHA-1)/i);
+    const sourceMatch = msg.match(/来源类:\s*([\w\.]+)/i);
+    const inputMatch = msg.match(/输入参数:\s*(.+)/i);
+    const keyMatch = msg.match(/密钥:\s*([a-f0-9]+)/i);
+
+    if (resultMatch) {
+      return {
+        id: `sig-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+        timestamp: Date.now(),
+        type: algoMatch?.[1]?.includes("SHA") ? "HMAC" : "MD5",
+        algo: algoMatch?.[1] || algoMatch?.[2] || "Unknown",
+        result: resultMatch[1],
+        sourceClass: sourceMatch?.[1],
+        input: inputMatch?.[1],
+        key: keyMatch?.[1],
+      };
+    }
+  }
+
+  // 解析 HTTP sign 字段
+  if (msg.includes("[🔑Sign字段]")) {
+    const signMatch = msg.match(/sign值:\s*([^\s]+)/i);
+    const urlMatch = msg.match(/URL:\s*(.+)/i);
+
+    if (signMatch) {
+      return {
+        id: `http-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+        timestamp: Date.now(),
+        type: "HTTP",
+        result: signMatch[1],
+        url: urlMatch?.[1],
+      };
+    }
+  }
+
+  return null;
+};
 
 interface AppFile {
   name: string;
   path: string;
+}
+
+interface ModelConfig {
+  provider?: string;
+  apiKey?: string;
+  baseURL?: string;
+  model?: string;
+  temperature?: number;
+  maxTokens?: number;
 }
 
 // ============================================================================
@@ -206,9 +305,49 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
 
   // 状态管理
   const [isTaskPanelOpen, setIsTaskPanelOpen] = useState(false);
-  const [activeApkName, setActiveApkName] = useState(""); // 当前上下文的文件名
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [isRunning, setIsRunning] = useState(false); // 任务是否运行中
+  const [activeApkName, setActiveApkName] = useState("");
+  // const [logs, setLogs] = useState<LogEntry[]>([]); // ❌ 移除本地状态
+  const [logFilter, setLogFilter] = useState<"all" | "key">("all");
+  const [signCaptures, setSignCaptures] = useState<SignCapture[]>([]);
+  // const [httpRequests, setHttpRequests] = useState<NetworkRequest[]>([]); // ❌ 移除本地状态
+  const [isRunning, setIsRunning] = useState(false);
+  const [isMitmRunning, setIsMitmRunning] = useState(false); // 🔥 抓包服务状态
+
+  // 模型配置相关状态
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [modelConfig, setModelConfig] = useState<ModelConfig>({
+    provider: "openai",
+    apiKey: "",
+    baseURL: "",
+    model: "",
+    temperature: 0.1,
+    maxTokens: 1024
+  });
+  const [configForm] = Form.useForm();
+
+  // 加载配置
+  useEffect(() => {
+    const saved = localStorage.getItem("retool_model_config");
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        setModelConfig(parsed);
+        configForm.setFieldsValue(parsed);
+      } catch (e) {
+        console.error("Failed to load model config", e);
+      }
+    }
+  }, []);
+
+  const handleSaveConfig = () => {
+    configForm.validateFields().then((values) => {
+      const newConfig = { ...modelConfig, ...values };
+      setModelConfig(newConfig);
+      localStorage.setItem("retool_model_config", JSON.stringify(newConfig));
+      setIsSettingsOpen(false);
+      message.success("模型配置已保存");
+    });
+  };
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
@@ -218,10 +357,21 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
   const streamContentBuffer = useRef<string>("");
   const streamReasoningBuffer = useRef<string>("");
   const currentTaskSteps = useRef<TaskStep[]>([]); // 暂存当前的步骤，用于存入DB
+  const sessionTaskStepsRef = useRef<TaskStep[]>([]);
 
   // Session Ref
   const currentSessionRef = useRef(sessionId);
   useEffect(() => {
+    // Session 切换时，重置当前会话的状态
+    if (currentSessionRef.current !== sessionId) {
+      // setHttpRequests([]); // 由 useLiveQuery 自动处理
+      setSignCaptures([]);
+      setActiveApkName("");
+      setPendingFile(null);
+      setIsRunning(false);
+      // 注意：mitmproxy 服务是全局的，切换会话不一定要停止它，
+      // 但 UI 上显示的抓包列表应该清空 (已通过 setHttpRequests([]) 实现)
+    }
     currentSessionRef.current = sessionId;
   }, [sessionId]);
 
@@ -230,6 +380,18 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
       () => db.chatMessages.where({ sessionId }).toArray(),
       [sessionId]
     ) || [];
+
+  // 🔥 实时查询日志
+  const logs = useLiveQuery(
+    () => db.sessionLogs.where({ sessionId }).toArray(),
+    [sessionId]
+  ) || [];
+
+  // 🔥 实时查询网络抓包
+  const httpRequests = useLiveQuery(
+    () => db.networkCaptures.where({ sessionId }).toArray(),
+    [sessionId]
+  ) || [];
 
   // 自动滚动
   useEffect(() => {
@@ -249,12 +411,46 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
       logsEndRef.current.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
 
-  const addLog = (
+  // 🔥 组件卸载时自动停止 mitmproxy 服务
+  useEffect(() => {
+    return () => {
+      // 组件卸载时停止抓包服务
+      invoke("stop_mitmproxy").catch(() => { });
+    };
+  }, []);
+
+  const addLog = async (
     source: LogEntry["source"],
     msg: string,
     type: LogEntry["type"] = "info"
   ) => {
-    setLogs((prev) => [...prev, { source, msg, type }]);
+    const isKey = isKeyResultLog(msg); // 🔥 自动识别关键日志
+
+    // 🔥 写入数据库持久化
+    // Fix: 使用 Ref 获取当前最新的 sessionId，防止闭包导致写入旧会话
+    const activeSessionId = currentSessionRef.current;
+
+    await db.sessionLogs.add({
+      sessionId: activeSessionId,
+      source,
+      msg,
+      type,
+      isKeyResult: isKey,
+      time: Date.now()
+    });
+
+    // setLogs((prev) => [...prev, { source, msg, type, isKeyResult: isKey }]);
+
+    // 🔥 尝试解析签名信息
+    const signInfo = parseSignatureFromLog(msg);
+    if (signInfo) {
+      setSignCaptures((prev) => {
+        // 避免重复添加相同结果
+        const exists = prev.some(s => s.result === signInfo.result);
+        if (exists) return prev;
+        return [...prev, signInfo].slice(-20); // 最多保留 20 条
+      });
+    }
   };
 
   // ========================================================
@@ -296,20 +492,35 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
       );
 
       // 3. 监听任务计划更新 (Task Plan)
-      unlistenPromises.push(
-        listen("agent_task_update", (event: any) => {
-          const newSteps = event.payload;
-          if (!currentStreamingMsgId.current) return;
+      listen("agent_task_update", (event: any) => {
+        const newSteps = event.payload;
+        if (!Array.isArray(newSteps)) return;
 
-          if (Array.isArray(newSteps)) {
-            currentTaskSteps.current = newSteps;
-            // 将步骤直接存入当前消息体中
-            db.chatMessages.update(currentStreamingMsgId.current, {
-              steps: newSteps,
-            });
-          }
-        })
-      );
+        // ✅ 永远更新会话级任务
+        sessionTaskStepsRef.current = newSteps;
+
+        // 1️⃣ 如果当前有正在流的消息，绑定到它
+        if (currentStreamingMsgId.current) {
+          currentTaskSteps.current = newSteps;
+          db.chatMessages.update(currentStreamingMsgId.current, {
+            steps: newSteps,
+          });
+          return;
+        }
+
+        // 2️⃣ 如果没有流式消息（比如已经分析完），
+        //    绑定到“最近一条 AI 消息”
+        db.chatMessages
+          .where({ sessionId, role: "ai" })
+          .last()
+          .then((lastMsg) => {
+            if (lastMsg?.id) {
+              db.chatMessages.update(lastMsg.id, {
+                steps: newSteps,
+              });
+            }
+          });
+      });
 
       // 4. 监听结束信号
       unlistenPromises.push(
@@ -332,6 +543,51 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
           currentTaskSteps.current = [];
         })
       );
+
+      // 5. 监听 Frida 实时日志
+      // 这是 Rust 传来的真机运行日志
+      unlistenPromises.push(
+        listen("frida-log", (event: any) => {
+          const msg = event.payload as string;
+          // 将日志添加到右侧面板，来源标记为 "Device"
+          addLog("Device", msg, msg.includes("Error") ? "error" : "success");
+        })
+      );
+
+      // 🔥 6. 监听 HTTP 网络抓包 (mitmproxy)
+      unlistenPromises.push(
+        listen("mitm-traffic", (event: any) => {
+          const rawMsg = (event.payload as string).trim();
+          if (!rawMsg.startsWith("{")) return;
+
+          try {
+            const traffic = JSON.parse(rawMsg);
+
+            // Simple ID generator if uuidv4 is missing
+            const genId = () => Math.random().toString(36).substring(2) + Date.now().toString(36);
+
+            const newReq = {
+              id: traffic.id || genId(),
+              sessionId: currentSessionRef.current, // Fix: Use ref
+              method: traffic.method,
+              url: traffic.url,
+              host: traffic.host,
+              path: traffic.path,
+              status: traffic.status,
+              duration: traffic.duration,
+              requestHeaders: traffic.request_headers,
+              responseHeaders: traffic.response_headers,
+              requestBody: traffic.request_body,
+              responseBody: traffic.response_body,
+              timestamp: Date.now(),
+            };
+
+            db.networkCaptures.put(newReq).catch(console.error);
+          } catch (e) {
+            console.error("Failed to parse mitm-traffic:", e);
+          }
+        })
+      );
     };
 
     setupListeners();
@@ -349,8 +605,25 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
   // ==========================================
   const startPipeline = async (file: AppFile, userInstruction: string = "") => {
     setIsRunning(true);
-    setLogs([]); // 清空日志
+    // setLogs([]); // ❌ 不要清空日志，用户希望保留历史
+    // setHttpRequests([]); // 🔥 不需要清空，由 DB 管理
     setActiveApkName(file.name); // 设置当前上下文
+
+    // 🔥 自动启动 mitmproxy 抓包服务
+    try {
+      addLog("Local", "正在启动抓包服务...", "info");
+      await invoke("start_mitmproxy", { port: 10086 });
+      addLog("Local", "✅ 抓包服务已启动 (端口:10086)", "success");
+      setIsMitmRunning(true); // 🔥 更新抓包服务状态
+    } catch (e: any) {
+      // 如果是端口已占用 (服务已启动)，忽略错误继续执行
+      if (!e.toString().includes("already") && !e.toString().includes("占用")) {
+        addLog("Local", `⚠️ 抓包服务启动失败: ${e}`, "warning");
+      } else {
+        addLog("Local", "✅ 抓包服务已在运行中", "success");
+        setIsMitmRunning(true); // 🔥 更新抓包服务状态
+      }
+    }
 
     // 初始化步骤 (本地)
     currentTaskSteps.current = [
@@ -366,6 +639,8 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
 
     let unlistenJadx: UnlistenFn | undefined;
     let unlistenConnect: UnlistenFn | undefined;
+
+    console.log(currentTaskSteps.current, "currentTaskSteps.current");
 
     try {
       // 1. 发送占位消息 (包含初始步骤)
@@ -388,12 +663,12 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
       const workspacePath = localStorage.getItem("retool_workspace_path");
 
       // 监听 JADX 进度
-      unlistenJadx = await listen("jadx-progress-tick", () => {});
+      unlistenJadx = await listen("jadx-progress-tick", () => { });
 
-      const outputDir = await invoke("jadx_decompile", {
+      const outputDir = (await invoke("jadx_decompile", {
         apkPath: file.path,
         outputDir: workspacePath || null,
-      });
+      })) as string;
 
       if (unlistenJadx) unlistenJadx();
       addLog("Local", `反编译完成`, "success");
@@ -430,12 +705,66 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
       });
       if (unlistenConnect) unlistenConnect();
 
+      // 🔍 补充：获取文件树和 Manifest (Handshake Phase)
+      addLog("Local", "🔍 正在构建上下文 (Manifest + FileTree)...", "info");
+
+      let fileTree: any = [];
+      let manifestContent = "";
+
+      try {
+        // 1. 获取文件树
+        fileTree = await invoke("scan_local_dir", { path: outputDir });
+
+        // 2. 尝试读取 AndroidManifest.xml
+        // 改进：如果根目录没有，尝试在 fileTree 里找
+        const separator = outputDir.includes("\\") ? "\\" : "/";
+        let manifestPath = `${outputDir}${separator}AndroidManifest.xml`;
+
+        try {
+          manifestContent = await invoke("read_local_file", { path: manifestPath }) as string;
+          addLog("Local", "📦 已提取 AndroidManifest.xml", "success");
+        } catch (e) {
+          // 🔥 尝试深度查找
+          addLog("Local", "⚠️ 根目录未找到 Manifest，正在深度搜索...", "warning");
+
+          const findManifest = (nodes: any[]): string | null => {
+            for (const node of nodes) {
+              if (node.title === "AndroidManifest.xml") return node.key;
+              if (node.children) {
+                const found = findManifest(node.children);
+                if (found) return found;
+              }
+            }
+            return null;
+          };
+
+          const deepPath = findManifest(fileTree);
+          if (deepPath) {
+            addLog("Local", `🔍 已定位 Manifest: ${deepPath}`, "success");
+            try {
+              manifestContent = await invoke("read_local_file", { path: deepPath }) as string;
+            } catch (err) {
+              addLog("Local", `❌ 读取 Manifest 失败: ${err}`, "error");
+            }
+          } else {
+            addLog("Local", "❌ 彻底未找到 AndroidManifest.xml", "error");
+          }
+        }
+      } catch (e) {
+        addLog("Local", `上下文构建失败: ${e}`, "warning");
+      }
+
       // 4. 通知云端开始任务
       addLog("Local", `发送指令: ${userInstruction || "默认分析"}`, "info");
+
+      // 🔥 传递 ModelConfig + Context
       await invoke("notify_cloud_job_start", {
         sessionId: sessionId,
         filePath: outputDir,
         instruction: userInstruction,
+        modelConfig: modelConfig,
+        manifest: manifestContent, // 🔥 Handshake Payload
+        fileTree: fileTree        // 🔥 Handshake Payload
       });
     } catch (e) {
       if (unlistenJadx) unlistenJadx();
@@ -499,9 +828,11 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
       streamReasoningBuffer.current = "";
 
       try {
+        // 🔥 传递 ModelConfig
         await invoke("send_chat_message", {
           sessionId: sessionId,
           message: currentInput,
+          modelConfig: modelConfig, // Pass config
         });
       } catch (e) {
         message.error("发送失败: " + e);
@@ -541,6 +872,53 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
         background: "#f5f7fa",
       }}
     >
+      {/* Settings Modal */}
+      <Modal
+        title="🤖 AI 模型配置"
+        open={isSettingsOpen}
+        onOk={handleSaveConfig}
+        onCancel={() => setIsSettingsOpen(false)}
+        okText="保存配置"
+        cancelText="取消"
+      >
+        <Form
+          form={configForm}
+          layout="vertical"
+          initialValues={modelConfig}
+        >
+          <Form.Item name="provider" label="Provider (服务商)">
+            <Select>
+              <Select.Option value="openai">OpenAI (Standard)</Select.Option>
+              <Select.Option value="deepseek">DeepSeek</Select.Option>
+              <Select.Option value="gemini">Google Gemini</Select.Option>
+              <Select.Option value="nvidia">Nvidia NIM</Select.Option>
+              <Select.Option value="custom">Custom (Ollama/LocalAI)</Select.Option>
+            </Select>
+          </Form.Item>
+
+          <Form.Item name="apiKey" label="API Key">
+            <Input.Password placeholder="sk-..." />
+          </Form.Item>
+
+          <Form.Item name="model" label="Model Name (模型名称)">
+            <Input placeholder="gpt-4o / deepseek-chat / gemini-1.5-flash" />
+          </Form.Item>
+
+          <Form.Item name="baseURL" label="Base URL (可选)">
+            <Input placeholder="https://api.openai.com/v1" />
+          </Form.Item>
+
+          <div style={{ display: 'flex', gap: 16 }}>
+            <Form.Item name="temperature" label="Temperature">
+              <InputNumber min={0} max={2} step={0.1} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item name="maxTokens" label="Max Tokens">
+              <InputNumber min={100} max={32000} step={100} style={{ width: '100%' }} />
+            </Form.Item>
+          </div>
+        </Form>
+      </Modal>
+
       {/* Header */}
       <div
         style={{
@@ -575,6 +953,12 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
           </span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <Tooltip title="模型设置">
+            <Button
+              icon={<SettingOutlined />}
+              onClick={() => setIsSettingsOpen(true)}
+            />
+          </Tooltip>
           <Tooltip title={isTaskPanelOpen ? "收起日志" : "查看系统日志"}>
             <Button
               type={isTaskPanelOpen ? "primary" : "text"}
@@ -659,7 +1043,6 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
                   style={{ marginBottom: 4 }}
                 />
               </Tooltip>
-
               <TextArea
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
@@ -702,66 +1085,251 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
           </div>
         </div>
 
-        {/* Right: System Logs (简化版) */}
+        {/* Right: 两个独立卡片面板 */}
         <div
           style={{
-            width: isTaskPanelOpen ? "35%" : 0,
+            width: isTaskPanelOpen ? "38%" : 0,
             opacity: isTaskPanelOpen ? 1 : 0,
             overflow: "hidden",
             transition: "all 0.3s",
-            background: "#1e1e1e",
+            background: "#f0f2f5",
             display: "flex",
             flexDirection: "column",
+            gap: 12,
+            padding: isTaskPanelOpen ? 12 : 0,
           }}
         >
-          <div
-            style={{
-              padding: "12px 16px",
-              borderBottom: "1px solid #333",
-              color: "#fff",
-              fontWeight: 600,
-              display: "flex",
-              justifyContent: "space-between",
-            }}
-          >
-            <span>系统日志</span>
+          {/* 顶部：关闭按钮 */}
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
             <CloseOutlined
-              style={{ cursor: "pointer" }}
+              style={{ cursor: "pointer", color: "#666", fontSize: 16 }}
               onClick={() => setIsTaskPanelOpen(false)}
             />
           </div>
+
+          {/* 🌐 卡片1：网络抓包 (浅色背景 - 类似 Charles/Fiddler) */}
           <div
             style={{
-              flex: 1,
-              padding: "12px",
-              overflowY: "auto",
-              fontFamily: "monospace",
-              fontSize: 12,
-              color: "#a9b7c6",
+              background: "#fff",
+              borderRadius: 8,
+              boxShadow: "0 2px 8px rgba(0,0,0,0.08)",
+              flex: "0 0 45%",
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
             }}
           >
-            {logs.map((log, idx) => (
-              <div
-                key={idx}
-                style={{ marginBottom: 6, wordBreak: "break-all" }}
-              >
-                <span
+            {/* 卡片头部 */}
+            <div
+              style={{
+                padding: "12px 16px",
+                borderBottom: "1px solid #f0f0f0",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+              }}
+            >
+              <span style={{ fontWeight: 600, color: "#333" }}>
+                🌐 网络抓包 <Tag color="blue">{httpRequests.length}</Tag>
+              </span>
+              {httpRequests.length > 0 && (
+                <Button size="small" type="text" onClick={() => db.networkCaptures.where({ sessionId }).delete()}>
+                  清空
+                </Button>
+              )}
+            </div>
+            {/* 卡片内容 - 请求列表 */}
+            <div style={{ flex: 1, overflowY: "auto" }}>
+              {httpRequests.length === 0 ? (
+                <div style={{ color: "#999", textAlign: "center", padding: 30 }}>
+                  暂无网络请求<br />
+                  {!isMitmRunning ? (
+                    <Button
+                      type="primary"
+                      size="small"
+                      style={{ marginTop: 12 }}
+                      onClick={async () => {
+                        try {
+                          await invoke("start_mitmproxy", { port: 10086 });
+                          setIsMitmRunning(true);
+                          message.success("抓包服务已启动");
+                        } catch (e: any) {
+                          if (e.toString().includes("already") || e.toString().includes("占用")) {
+                            setIsMitmRunning(true);
+                            message.info("抓包服务已在运行中");
+                          } else {
+                            message.error("启动失败: " + e);
+                          }
+                        }
+                      }}
+                    >
+                      🔄 启动抓包服务
+                    </Button>
+                  ) : (
+                    <span style={{ fontSize: 12 }}>抓包服务运行中，等待网络请求...</span>
+                  )}
+                </div>
+              ) : (
+                httpRequests.slice().reverse().map((req) => (
+                  <div
+                    key={req.id}
+                    style={{
+                      padding: "10px 16px",
+                      borderBottom: "1px solid #f5f5f5",
+                      cursor: "pointer",
+                      transition: "background 0.2s",
+                    }}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = "#fafafa")}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                  >
+                    {/* 第一行：Method + Status + Host */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                      <Tag
+                        color={req.method === "GET" ? "blue" : req.method === "POST" ? "green" : "orange"}
+                        style={{ margin: 0 }}
+                      >
+                        {req.method}
+                      </Tag>
+                      {req.status && (
+                        <Tag
+                          color={req.status >= 200 && req.status < 300 ? "success" : req.status >= 400 ? "error" : "warning"}
+                          style={{ margin: 0 }}
+                        >
+                          {req.status}
+                        </Tag>
+                      )}
+                      <span style={{ fontSize: 12, color: "#666", fontWeight: 500 }}>
+                        {req.host}
+                      </span>
+                    </div>
+
+                    {/* 第二行：Path - 可横向滚动 */}
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: "#1890ff",
+                        overflowX: "auto",
+                        whiteSpace: "nowrap",
+                        fontFamily: "monospace",
+                      }}
+                    >
+                      {req.path}
+                    </div>
+
+                    {/* 第三行：如果 URL 包含 sign 参数则高亮显示 */}
+                    {req.url.toLowerCase().includes("sign=") && (
+                      <div style={{ marginTop: 4 }}>
+                        <Tag color="gold" style={{ fontSize: 10 }}>🔐 包含 sign 参数</Tag>
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* 📋 卡片2：系统日志 (深色背景) */}
+          <div
+            style={{
+              background: "#1e1e1e",
+              borderRadius: 8,
+              boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+              flex: 1,
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
+            }}
+          >
+            {/* 卡片头部 */}
+            <div
+              style={{
+                padding: "10px 16px",
+                borderBottom: "1px solid #333",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+              }}
+            >
+              <span style={{ fontWeight: 600, color: "#fff" }}>📋 系统日志</span>
+              <div style={{ display: "flex", gap: 4 }}>
+                <Button
+                  size="small"
+                  type={logFilter === "all" ? "primary" : "text"}
+                  onClick={() => setLogFilter("all")}
                   style={{
-                    color:
-                      log.source === "Local"
-                        ? "#faad14"
-                        : log.source === "Agent"
-                        ? "#52c41a"
-                        : "#1890ff",
-                    marginRight: 8,
+                    fontSize: 11,
+                    color: logFilter === "all" ? "#fff" : "#888",
+                    background: logFilter === "all" ? "#1890ff" : "transparent",
                   }}
                 >
-                  [{log.source}]
-                </span>
-                <span>{log.msg}</span>
+                  全部
+                </Button>
+                <Button
+                  size="small"
+                  type={logFilter === "key" ? "primary" : "text"}
+                  onClick={() => setLogFilter("key")}
+                  style={{
+                    fontSize: 11,
+                    color: logFilter === "key" ? "#fff" : "#888",
+                    background: logFilter === "key" ? "#52c41a" : "transparent",
+                  }}
+                >
+                  🔑 关键
+                </Button>
+                <Button
+                  size="small"
+                  type="text"
+                  onClick={() => db.sessionLogs.where({ sessionId }).delete()}
+                  style={{ fontSize: 11, color: "#888" }}
+                >
+                  清空
+                </Button>
               </div>
-            ))}
-            <div ref={logsEndRef} />
+            </div>
+            {/* 卡片内容 */}
+            <div
+              style={{
+                flex: 1,
+                padding: 12,
+                overflowY: "auto",
+                fontFamily: "monospace",
+                fontSize: 11,
+                color: "#a9b7c6",
+              }}
+            >
+              {logs
+                .filter(log => logFilter === "all" || log.isKeyResult)
+                .filter(log => !/[\x00-\x1F]/.test(log.msg)) // 🔥 过滤乱码控制字符
+                .map((log, idx) => (
+                  <div
+                    key={idx}
+                    style={{
+                      marginBottom: 4,
+                      padding: "4px 8px",
+                      borderRadius: 4,
+                      background: log.isKeyResult ? "rgba(82, 196, 26, 0.1)" : "transparent",
+                      borderLeft: log.isKeyResult ? "2px solid #52c41a" : "2px solid transparent",
+                    }}
+                  >
+                    <span
+                      style={{
+                        color:
+                          log.source === "Local" ? "#faad14" :
+                            log.source === "Agent" ? "#52c41a" :
+                              log.source === "Device" ? "#1890ff" : "#888",
+                        marginRight: 6,
+                        fontSize: 10,
+                      }}
+                    >
+                      [{log.source}]
+                    </span>
+                    <span style={{ color: log.isKeyResult ? "#fff" : "#a9b7c6" }}>
+                      {log.msg.replace(/[\x00-\x1F]/g, "")}
+                    </span>
+                  </div>
+                ))}
+              <div ref={logsEndRef} />
+            </div>
           </div>
         </div>
       </div>

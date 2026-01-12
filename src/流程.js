@@ -126,7 +126,7 @@
 //     Client->>Client: 🧠 Chunking & Embedding -> 存入本地 VectorDB
 
 //     Note over Client, Cloud: === 阶段 2: 握手 & 语义检索 ===
-//     Client->>Cloud: 发送 Manifest + 任务目标
+//     Client->>Cloud: 发送 Manifest + apk解包后的文件目录树 + 任务目标（就是固定提示词与用户要求）
 //     Cloud->>Client: 🔍 指令: VECTOR_SEARCH("加密 签名 Sign", k=5)
 //     Client->>Client: 本地向量搜索
 //     Client->>Cloud: 返回相关代码片段 (Top 5 Chunks)
