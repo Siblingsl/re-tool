@@ -80,7 +80,8 @@ fn start_socket_client(app_handle: AppHandle, session_id: String) {
     let cmd_handle = app_handle.clone();
     let stream_handle = app_handle.clone();     // 给 AI 流使用
     let stream_end_handle = app_handle.clone(); // 给 AI 流结束使用
-    let plan_handle = app_handle.clone();       // ✅ 新增：给任务计划更新使用
+    let plan_handle = app_handle.clone();       // 给任务计划更新使用
+    let log_handle = app_handle.clone();        // 🔥 新增：给日志转发使用
 
     IS_CONNECTED.store(true, Ordering::SeqCst);
 
@@ -144,6 +145,35 @@ fn start_socket_client(app_handle: AppHandle, session_id: String) {
             if let Ok(val) = serde_json::from_str::<Value>(&json_str) {
                  println!("[Agent] 📅 Received Task Update");
                  let _ = plan_handle.emit("agent_task_update", val);
+            }
+        })
+        // ========================================================
+        // 🔥 新增：监听云端日志并转发给前端 UI
+        // ========================================================
+        .on("log_message", move |payload: Payload, _| {
+            let json_str = match payload {
+                Payload::String(s) => s,
+                Payload::Text(values) => {
+                    if let Some(v) = values.first() { v.to_string() } else { return; }
+                },
+                Payload::Binary(_) => return,
+            };
+            
+            // 解析日志并转发给前端
+            if let Ok(val) = serde_json::from_str::<Value>(&json_str) {
+                // 日志格式: { source: "Cloud", msg: "...", type: "info" }
+                let source = val.get("source").and_then(|v| v.as_str()).unwrap_or("Cloud");
+                let msg = val.get("msg").and_then(|v| v.as_str()).unwrap_or("");
+                let log_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("info");
+                
+                println!("[{}] {}", source, msg);
+                
+                // 🔥 转发给前端 - 使用 cloud-log 事件
+                let _ = log_handle.emit("cloud-log", serde_json::json!({
+                    "source": source,
+                    "msg": msg,
+                    "type": log_type
+                }));
             }
         })
         // ========================================================
@@ -407,8 +437,9 @@ pub async fn notify_cloud_job_start(
     file_path: String, 
     instruction: String,
     model_config: Option<ModelConfig>,
-    manifest: Option<String>,    // 🔥 New
-    file_tree: Option<Vec<FileNode>>   // 🔥 New
+    manifest: Option<String>,
+    file_tree: Option<Vec<FileNode>>,
+    network_captures: Option<Vec<serde_json::Value>>  // 🔥 新增：网络抓包数据
 ) -> Result<String, String> {
     println!("[Agent] 🚀 Notifying Cloud. Instruction: {}", instruction);
 
@@ -447,14 +478,15 @@ pub async fn notify_cloud_job_start(
     let client = reqwest::Client::new();
     let body = serde_json::json!({ 
         "sessionId": session_id, 
-        "filePath": file_path,  // 🔥 修复：添加 filePath 参数
+        "filePath": file_path,
         "instruction": instruction,
         "modelConfig": model_config,
         "projectInfo": {
             "packageName": package_name,
             "manifestXml": manifest.unwrap_or_default(),
             "fileTree": refined_list
-        }
+        },
+        "networkCaptures": network_captures.unwrap_or_default() // 🔥 新增：发送网络抓包数据
     });
 
     let res = client.post(format!("{}/api/client-ready", CLOUD_URL))

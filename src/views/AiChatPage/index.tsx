@@ -57,30 +57,18 @@ interface LogEntry {
 }
 
 // 🔥 判断日志是否为关键结果的函数
+// ❗ 更严格的匹配规则，只有真正的签名/加密结果才标记为关键
 const isKeyResultLog = (msg: string): boolean => {
-  const keyPatterns = [
-    // 原有规则
-    /\[Digest\].*Result:/i,
-    /\[HMAC\].*Result:/i,
-    /\[HMAC\].*Key:/i,
-    /\[Sign\].*Result:/i,
-    /\[Cipher\].*ENCRYPT/i,
-    /\[Cipher\].*DECRYPT/i,
-    /\[HTTP\].*🔐/,
-    /\[FormBody\].*🔐/,
-    /sign.*=/i,
-    /密钥|密码|token|secret/i,
-    /Stack:/i,
-    // 🔥 新增：高级签名追踪规则
-    /\[🔑签名结果\]/,
-    /\[🔑签名输入\]/,
-    /\[🔑签名密钥\]/,
-    /\[🔑Sign字段\]/,
-    /\[🔑匹配成功\]/,
-    /\[🔑返回值\]/,
-    /═══════/,  // 分隔线
+  // 🔑 高优先级：真正的签名/加密结果
+  const highPriorityPatterns = [
+    /\[🔑签名结果\].*Result:/i,   // 必须有 Result 才算
+    /\[🔑匹配成功\]/,              // 签名匹配成功
+    /\[Digest\].*Result:\s*[a-f0-9]{16,}/i,  // MD5/SHA 结果
+    /\[HMAC\].*Result:\s*[a-f0-9]{16,}/i,    // HMAC 结果
+    /\[Cipher\].*(ENCRYPT|DECRYPT).*Result/i, // 加密结果
+    /\[🔑Sign字段\].*sign.*=/i,   // HTTP 签名字段
   ];
-  return keyPatterns.some(pattern => pattern.test(msg));
+  return highPriorityPatterns.some(pattern => pattern.test(msg));
 };
 
 // 🔥 签名捕获数据结构
@@ -419,11 +407,32 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
     };
   }, []);
 
+  // 🔥 去重：记录最近添加的日志 (用于防止重复)
+  const recentLogsRef = useRef<Map<string, number>>(new Map());
+
   const addLog = async (
     source: LogEntry["source"],
     msg: string,
     type: LogEntry["type"] = "info"
   ) => {
+    // 🔥 去重逻辑：相同消息在 2 秒内不重复添加
+    const dedupKey = `${source}:${msg}`;
+    const now = Date.now();
+    const lastTime = recentLogsRef.current.get(dedupKey);
+
+    if (lastTime && now - lastTime < 2000) {
+      return; // 跳过重复日志
+    }
+    recentLogsRef.current.set(dedupKey, now);
+
+    // 清理过期的去重记录 (保持 Map 不会无限增长)
+    if (recentLogsRef.current.size > 100) {
+      const cutoff = now - 5000;
+      for (const [key, time] of recentLogsRef.current.entries()) {
+        if (time < cutoff) recentLogsRef.current.delete(key);
+      }
+    }
+
     const isKey = isKeyResultLog(msg); // 🔥 自动识别关键日志
 
     // 🔥 写入数据库持久化
@@ -551,6 +560,18 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
           const msg = event.payload as string;
           // 将日志添加到右侧面板，来源标记为 "Device"
           addLog("Device", msg, msg.includes("Error") ? "error" : "success");
+        })
+      );
+
+      // &#x1F525; 7. 监听云端日志 (cloud-log)
+      unlistenPromises.push(
+        listen("cloud-log", (event: any) => {
+          const payload = event.payload as { source: string; msg: string; type: string };
+          addLog(
+            (payload.source as LogEntry["source"]) || "Cloud",
+            payload.msg,
+            (payload.type as LogEntry["type"]) || "info"
+          );
         })
       );
 
@@ -757,14 +778,15 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
       // 4. 通知云端开始任务
       addLog("Local", `发送指令: ${userInstruction || "默认分析"}`, "info");
 
-      // 🔥 传递 ModelConfig + Context
+      // 🔥 传递 ModelConfig + Context + NetworkCaptures
       await invoke("notify_cloud_job_start", {
         sessionId: sessionId,
         filePath: outputDir,
         instruction: userInstruction,
         modelConfig: modelConfig,
         manifest: manifestContent, // 🔥 Handshake Payload
-        fileTree: fileTree        // 🔥 Handshake Payload
+        fileTree: fileTree,        // 🔥 Handshake Payload
+        networkCaptures: httpRequests // 🔥 新增：发送网络抓包数据给 AI 分析
       });
     } catch (e) {
       if (unlistenJadx) unlistenJadx();
@@ -1217,7 +1239,7 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
                     </div>
 
                     {/* 第三行：如果 URL 包含 sign 参数则高亮显示 */}
-                    {req.url.toLowerCase().includes("sign=") && (
+                    {req.url?.toLowerCase().includes("sign=") && (
                       <div style={{ marginTop: 4 }}>
                         <Tag color="gold" style={{ fontSize: 10 }}>🔐 包含 sign 参数</Tag>
                       </div>
