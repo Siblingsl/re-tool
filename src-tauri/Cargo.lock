@@ -3496,6 +3496,7 @@ dependencies = [
  "dotenv",
  "goblin",
  "hex",
+ "lazy_static",
  "mdns-sd",
  "open",
  "rayon",

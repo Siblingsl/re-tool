@@ -320,16 +320,21 @@ async fn dispatch_command(app: &AppHandle, action: &str, params: Value) -> Resul
             let script = params["script"].as_str().ok_or("Missing script")?;
             let package = params["package"].as_str().ok_or("Missing package")?;
             let device_id = params["deviceId"].as_str().unwrap_or("").to_string();
+            let mode = params["mode"].as_str().map(|s| s.to_string());
+            let session_id = CURRENT_SESSION_ID.lock().unwrap().clone();
             
             let result = commands::frida::run_frida_script(
                 app.clone(), 
                 device_id, 
                 package.to_string(), 
-                script.to_string()
+                script.to_string(),
+                mode,           // 🔥 新增：spawn/attach 模式
+                session_id      // 🔥 新增：用于日志同步
             ).await.map_err(|e| e.to_string())?;
             
             Ok(json!(result)) 
         }
+
         "DUMP_DEX" => {
             let package = params["package"].as_str().ok_or("Missing package")?;
             let result = commands::apk::detect_packer(package.to_string())

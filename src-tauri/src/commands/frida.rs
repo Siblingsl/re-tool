@@ -1,4 +1,4 @@
-use std::process::Stdio;
+use std::process::{Stdio, Child};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write, Cursor, Read};
 use std::time::Duration;
@@ -8,6 +8,22 @@ use xz2::read::XzDecoder;
 use tauri::Emitter;
 use crate::models::FridaRelease;
 use crate::utils::{cmd_exec, create_command};
+use std::sync::{Arc, Mutex};
+use lazy_static::lazy_static;
+
+// =====================================================
+// 🔥 全局状态：Frida 进程管理
+// =====================================================
+lazy_static! {
+    /// 当前运行的 Frida 子进程句柄
+    static ref FRIDA_PROCESS: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
+    
+    /// 当前会话 ID（用于日志同步）
+    static ref CURRENT_SESSION: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    
+    /// 云端服务器地址
+    static ref CLOUD_URL: String = std::env::var("CLOUD_URL").unwrap_or_else(|_| "http://127.0.0.1:3000".to_string());
+}
 
 async fn download_frida(version: &str, arch: &str) -> Result<String, String> {
     let filename = format!("frida-server-{}-android-{}.xz", version, arch);
@@ -90,9 +106,6 @@ pub async fn deploy_tool(device_id: String, tool_id: String, version: String, ar
 // 检查 Frida Server 是否正在运行
 #[tauri::command]
 pub async fn check_frida_running(device_id: String) -> Result<bool, String> {
-    // 方法 1: 使用 pidof (最准，Android 6+ 支持)
-    // 如果 frida-server 在运行，它会输出 PID (如 "1234")
-    // 如果没运行，输出为空，或者返回错误码
     let output = create_command("adb")
         .args(&["-s", &device_id, "shell", "pidof", "frida-server"])
         .output()
@@ -100,14 +113,11 @@ pub async fn check_frida_running(device_id: String) -> Result<bool, String> {
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
-        // 只要有数字输出，就是运行中
         if !stdout.trim().is_empty() {
             return Ok(true);
         }
     }
 
-    // 方法 2: 如果 pidof 失败，回退到 ps 过滤 (增加 -v grep 排除自己)
-    // 命令: ps -A | grep frida-server | grep -v grep
     let fallback_cmd = "ps -A | grep frida-server | grep -v grep";
     let output_fallback = create_command("adb")
         .args(&["-s", &device_id, "shell", fallback_cmd])
@@ -124,8 +134,27 @@ pub async fn check_frida_running(device_id: String) -> Result<bool, String> {
     Ok(false)
 }
 
+// =====================================================
+// 🔥 核心修复：增强版 Frida 脚本执行
+// =====================================================
 #[tauri::command]
-pub async fn run_frida_script(app: tauri::AppHandle, device_id: String, package_name: String, script_content: String) -> Result<String, String> {
+pub async fn run_frida_script(
+    app: tauri::AppHandle, 
+    device_id: String, 
+    package_name: String, 
+    script_content: String,
+    mode: Option<String>,       // 🔥 新增：spawn / attach
+    session_id: Option<String>  // 🔥 新增：用于日志同步
+) -> Result<String, String> {
+    // 0. 先停止之前的 Frida 进程（如果有）
+    stop_frida_internal();
+    
+    // 保存当前会话 ID
+    if let Some(sid) = &session_id {
+        let mut current = CURRENT_SESSION.lock().unwrap();
+        *current = Some(sid.clone());
+    }
+
     // 1. 将脚本保存到临时文件
     let temp_dir = std::env::temp_dir();
     let script_path = temp_dir.join("frida_script.js");
@@ -133,54 +162,141 @@ pub async fn run_frida_script(app: tauri::AppHandle, device_id: String, package_
     file.write_all(script_content.as_bytes()).map_err(|e| e.to_string())?;
 
     // 2. 构造 Frida 参数
-    let device_arg = if device_id.contains(":") || device_id.contains(".") {
-        format!("-D{}", device_id) // 网络设备需要 -D 192.168.x.x:5555
+    let device_arg = if device_id.is_empty() {
+        "-U".to_string() // 默认 USB
+    } else if device_id.contains(":") || device_id.contains(".") {
+        format!("-D{}", device_id) // 网络设备
     } else {
-        "-U".to_string() // USB 设备
+        "-U".to_string()
     };
 
-    // 3. 启动子进程，并劫持 stdout
-    // 注意：这里不需要 spawn move，因为我们要拿到 child 的句柄
-    let mut child = create_command("frida")
-        .arg(device_arg)
-        .arg("-f") // Spawn 模式
-        .arg(&package_name) // 包名
-        .arg("-l")
-        .arg(&script_path) // 脚本路径
-        .stdout(Stdio::piped()) // 🔥 关键：把输出管道接管过来
-        .stderr(Stdio::piped()) // 把错误输出也接管
-        .spawn()
+    // 3. 🔥 根据 mode 决定注入方式
+    let inject_mode = mode.unwrap_or_else(|| "spawn".to_string());
+    
+    let mut cmd = create_command("frida");
+    cmd.arg(&device_arg);
+    
+    if inject_mode == "spawn" {
+        cmd.arg("-f").arg(&package_name); // Spawn 模式：重启 App
+    } else {
+        cmd.arg("-n").arg(&package_name); // Attach 模式：附加到运行中的进程
+    }
+    
+    cmd.arg("-l").arg(&script_path);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    // 4. 启动子进程
+    let mut child = cmd.spawn()
         .map_err(|e| format!("Frida 启动失败 (请确保已安装 frida-tools): {}", e))?;
 
-    // 4. 获取管道句柄
+    // 5. 获取管道句柄
     let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
     let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
 
-    // 5. 克隆 app_handle 用于线程内发送
-    let app_clone_out = app.clone();
-    let app_clone_err = app.clone();
+    // 6. 🔥 保存进程句柄到全局状态
+    {
+        let mut process = FRIDA_PROCESS.lock().unwrap();
+        *process = Some(child);
+    }
 
-    // 6. 开启独立线程读取 STDOUT (正常日志)
+    // 7. 克隆必要的引用
+    let app_out = app.clone();
+    let app_err = app.clone();
+    let session_for_out = session_id.clone();
+    let session_for_err = session_id.clone();
+
+    // 8. 🔥 开启线程读取 STDOUT（正常日志）
     thread::spawn(move || {
         let reader = BufReader::new(stdout);
+        let client = reqwest::blocking::Client::new();
+        
         for line in reader.lines() {
             if let Ok(l) = line {
-                // 🔥 发送事件：frida-log
-                let _ = app_clone_out.emit("frida-log", l);
+                // 发送给前端 UI
+                let _ = app_out.emit("frida-log", l.clone());
+                
+                // 🔥 检测就绪信号
+                if l.contains("[FridaReady]") || l.contains("Spawned") {
+                    let _ = app_out.emit("frida-ready", true);
+                }
+                
+                // 🔥 同步到云端
+                if let Some(ref sid) = session_for_out {
+                    let _ = sync_log_to_cloud(&client, sid, &l);
+                }
             }
         }
+        
+        // 进程结束时清理状态
+        let mut process = FRIDA_PROCESS.lock().unwrap();
+        *process = None;
     });
 
-    // 7. 开启独立线程读取 STDERR (错误日志)
+    // 9. 开启线程读取 STDERR（错误日志）
     thread::spawn(move || {
         let reader = BufReader::new(stderr);
+        let client = reqwest::blocking::Client::new();
+        
         for line in reader.lines() {
             if let Ok(l) = line {
-                // 可以加个前缀区分错误
-                let _ = app_clone_err.emit("frida-log", format!("[ERROR] {}", l));
+                let msg = format!("[ERROR] {}", l);
+                let _ = app_err.emit("frida-log", msg.clone());
+                
+                // 同步错误日志到云端
+                if let Some(ref sid) = session_for_err {
+                    let _ = sync_log_to_cloud(&client, sid, &msg);
+                }
             }
         }
     });
 
-    Ok("Frida 进程已启动，请查看日志控制台".to_string())
+    let mode_desc = if inject_mode == "spawn" { "Spawn 模式" } else { "Attach 模式" };
+    Ok(format!("Frida 进程已启动 ({})，请查看日志控制台", mode_desc))
+}
+
+// =====================================================
+// 🔥 新增：停止 Frida 脚本
+// =====================================================
+#[tauri::command]
+pub async fn stop_frida_script() -> Result<String, String> {
+    stop_frida_internal();
+    Ok("Frida 进程已停止".to_string())
+}
+
+/// 内部函数：停止 Frida 进程
+fn stop_frida_internal() {
+    let mut process = FRIDA_PROCESS.lock().unwrap();
+    if let Some(ref mut child) = *process {
+        let _ = child.kill();
+        let _ = child.wait(); // 回收僵尸进程
+        println!("[Frida] 🛑 进程已终止");
+    }
+    *process = None;
+}
+
+// =====================================================
+// 🔥 新增：检查 Frida 进程是否存活
+// =====================================================
+#[tauri::command]
+pub async fn is_frida_alive() -> Result<bool, String> {
+    let process = FRIDA_PROCESS.lock().unwrap();
+    Ok(process.is_some())
+}
+
+// =====================================================
+// 🔥 新增：同步日志到云端
+// =====================================================
+fn sync_log_to_cloud(client: &reqwest::blocking::Client, session_id: &str, message: &str) -> Result<(), ()> {
+    let url = format!("{}/api/frida-log", CLOUD_URL.as_str());
+    
+    let _ = client.post(&url)
+        .json(&serde_json::json!({
+            "sessionId": session_id,
+            "message": message
+        }))
+        .timeout(Duration::from_millis(500)) // 快速超时，不阻塞主流程
+        .send();
+    
+    Ok(())
 }

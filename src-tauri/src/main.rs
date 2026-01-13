@@ -81,6 +81,8 @@ fn main() {
             frida::deploy_tool,
             frida::check_frida_running,
             frida::run_frida_script,
+            frida::stop_frida_script,    // 🔥 新增
+            frida::is_frida_alive,       // 🔥 新增
 
             // --- APK Tools (Local) ---
             apk::apk_decode,

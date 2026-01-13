@@ -41,3 +41,4 @@ rust_socketio = "0.6"
 capstone = "0.11"      # 反汇编引擎
 goblin = "0.7"
 hex = "0.4"
+lazy_static = "1.4"    # 🔥 新增：用于 Frida 进程全局状态管理

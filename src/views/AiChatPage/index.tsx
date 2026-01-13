@@ -410,24 +410,28 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
   // 🔥 去重：记录最近添加的日志 (用于防止重复)
   const recentLogsRef = useRef<Map<string, number>>(new Map());
 
+  // 🔥 日志条数限制
+  const MAX_LOGS_PER_SESSION = 1000;
+
   const addLog = async (
     source: LogEntry["source"],
     msg: string,
     type: LogEntry["type"] = "info"
   ) => {
-    // 🔥 去重逻辑：相同消息在 2 秒内不重复添加
+    // 🔥 优化去重逻辑：只对完全相同的源+消息在 500ms 内去重 (缩短时间窗口)
     const dedupKey = `${source}:${msg}`;
     const now = Date.now();
     const lastTime = recentLogsRef.current.get(dedupKey);
 
-    if (lastTime && now - lastTime < 2000) {
+    // 🔥 核心修复：500ms 内的相同日志才去重，避免丢失有价值的重复数据
+    if (lastTime && now - lastTime < 500) {
       return; // 跳过重复日志
     }
     recentLogsRef.current.set(dedupKey, now);
 
     // 清理过期的去重记录 (保持 Map 不会无限增长)
-    if (recentLogsRef.current.size > 100) {
-      const cutoff = now - 5000;
+    if (recentLogsRef.current.size > 200) {
+      const cutoff = now - 3000;
       for (const [key, time] of recentLogsRef.current.entries()) {
         if (time < cutoff) recentLogsRef.current.delete(key);
       }
@@ -436,7 +440,6 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
     const isKey = isKeyResultLog(msg); // 🔥 自动识别关键日志
 
     // 🔥 写入数据库持久化
-    // Fix: 使用 Ref 获取当前最新的 sessionId，防止闭包导致写入旧会话
     const activeSessionId = currentSessionRef.current;
 
     await db.sessionLogs.add({
@@ -448,7 +451,15 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
       time: Date.now()
     });
 
-    // setLogs((prev) => [...prev, { source, msg, type, isKeyResult: isKey }]);
+    // 🔥 日志条数限制：超过上限时删除最早的日志
+    const count = await db.sessionLogs.where({ sessionId: activeSessionId }).count();
+    if (count > MAX_LOGS_PER_SESSION) {
+      const oldest = await db.sessionLogs
+        .where({ sessionId: activeSessionId })
+        .sortBy('time');
+      const toDelete = oldest.slice(0, count - MAX_LOGS_PER_SESSION);
+      await db.sessionLogs.bulkDelete(toDelete.map(l => l.id!));
+    }
 
     // 🔥 尝试解析签名信息
     const signInfo = parseSignatureFromLog(msg);
@@ -461,6 +472,7 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
       });
     }
   };
+
 
   // ========================================================
   // 🎧 全局监听器 (流式响应、思考、任务计划)
@@ -563,7 +575,7 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
         })
       );
 
-      // &#x1F525; 7. 监听云端日志 (cloud-log)
+      // 🔥 7. 监听云端日志 (cloud-log)
       unlistenPromises.push(
         listen("cloud-log", (event: any) => {
           const payload = event.payload as { source: string; msg: string; type: string };
@@ -574,6 +586,14 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
           );
         })
       );
+
+      // 🔥 8. 监听 Frida 就绪信号
+      unlistenPromises.push(
+        listen("frida-ready", () => {
+          addLog("Device", "✅ Frida 注入就绪，开始监控...", "success");
+        })
+      );
+
 
       // 🔥 6. 监听 HTTP 网络抓包 (mitmproxy)
       unlistenPromises.push(
@@ -1338,17 +1358,23 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
                         color:
                           log.source === "Local" ? "#faad14" :
                             log.source === "Agent" ? "#52c41a" :
-                              log.source === "Device" ? "#1890ff" : "#888",
+                              log.source === "Device" ? "#1890ff" :
+                                log.source === "Cloud" ? "#eb2f96" : "#888",
                         marginRight: 6,
                         fontSize: 10,
                       }}
                     >
-                      [{log.source}]
+                      {/* 🔥 日志来源图标区分 */}
+                      {log.source === "Local" ? "💻" :
+                        log.source === "Agent" ? "🤖" :
+                          log.source === "Device" ? "📱" :
+                            log.source === "Cloud" ? "☁️" : "📋"} [{log.source}]
                     </span>
                     <span style={{ color: log.isKeyResult ? "#fff" : "#a9b7c6" }}>
                       {log.msg.replace(/[\x00-\x1F]/g, "")}
                     </span>
                   </div>
+
                 ))}
               <div ref={logsEndRef} />
             </div>
