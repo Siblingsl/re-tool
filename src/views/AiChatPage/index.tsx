@@ -38,9 +38,11 @@ import {
   Select,
   Form,
   InputNumber,
+  Dropdown,  // 🔥 新增
+  Menu,      // 🔥 新增
 } from "antd";
 import { useLiveQuery } from "dexie-react-hooks";
-import { db, ChatMessage, TaskStep } from "@/db";
+import { db, ChatMessage, TaskStep, RecentProject } from "@/db"; // 🔥 添加 RecentProject
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -301,6 +303,10 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
   const [isRunning, setIsRunning] = useState(false);
   const [isMitmRunning, setIsMitmRunning] = useState(false); // 🔥 抓包服务状态
 
+  // 🔥 新增：项目选择模态框状态
+  const [isProjectModalOpen, setIsProjectModalOpen] = useState(false);
+  const [pendingProjectPath, setPendingProjectPath] = useState<string | null>(null); // 🔥 新增：已选择的项目路径
+
   // 模型配置相关状态
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [modelConfig, setModelConfig] = useState<ModelConfig>({
@@ -379,6 +385,12 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
   const httpRequests = useLiveQuery(
     () => db.networkCaptures.where({ sessionId }).toArray(),
     [sessionId]
+  ) || [];
+
+  // 🔥 新增：实时查询历史项目（按最后使用时间倒序）
+  const recentProjects = useLiveQuery(
+    () => db.recentProjects.orderBy('lastUsed').reverse().limit(10).toArray(),
+    []
   ) || [];
 
   // 自动滚动
@@ -644,7 +656,11 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
   // ==========================================
   // 🔥 任务流程 (JADX -> Connect -> AI)
   // ==========================================
-  const startPipeline = async (file: AppFile, userInstruction: string = "") => {
+  const startPipeline = async (
+    file: AppFile,
+    userInstruction: string = "",
+    existingProjectPath?: string  // 🔥 新增：已有项目路径，传入则跳过 JADX
+  ) => {
     setIsRunning(true);
     // setLogs([]); // ❌ 不要清空日志，用户希望保留历史
     // setHttpRequests([]); // 🔥 不需要清空，由 DB 管理
@@ -670,49 +686,71 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
     currentTaskSteps.current = [
       {
         id: "local-1",
-        title: "JADX 预处理",
-        description: "正在反编译 APK...",
+        title: existingProjectPath ? "加载已有项目" : "JADX 预处理",
+        description: existingProjectPath ? "跳过解包，直接使用已有项目..." : "正在反编译 APK...",
         status: "process",
       },
     ];
 
-    addLog("Local", `开始处理文件: ${file.name}`, "info");
+    // 添加 AI 消息占位
+    const aiMsgId = await db.chatMessages.add({
+      sessionId,
+      role: "ai",
+      content: "",
+      reasoning: "",
+      steps: currentTaskSteps.current,
+      time: new Date().toLocaleTimeString(),
+    });
 
-    let unlistenJadx: UnlistenFn | undefined;
-    let unlistenConnect: UnlistenFn | undefined;
+    // 绑定全局流指针
+    currentStreamingMsgId.current = aiMsgId;
+    streamContentBuffer.current = "";
+    streamReasoningBuffer.current = "";
 
-    console.log(currentTaskSteps.current, "currentTaskSteps.current");
+    let outputDir: string;
+    let unlistenJadx: UnlistenFn | null = null;
+    let unlistenConnect: UnlistenFn | null = null;
 
     try {
-      // 1. 发送占位消息 (包含初始步骤)
-      const aiMsgId = await db.chatMessages.add({
-        sessionId,
-        role: "ai",
-        content: "",
-        reasoning: "",
-        steps: currentTaskSteps.current,
-        time: new Date().toLocaleTimeString(),
-      });
+      // 🔥 根据是否有已有项目路径决定是否执行 JADX
 
-      // 绑定全局流指针
-      currentStreamingMsgId.current = aiMsgId;
-      streamContentBuffer.current = "";
-      streamReasoningBuffer.current = "";
+      if (existingProjectPath) {
+        // 使用已有项目，跳过 JADX
+        addLog("Local", `📂 使用已有项目: ${existingProjectPath}`, "success");
+        outputDir = existingProjectPath;
 
-      // 2. 执行 JADX
-      addLog("Local", "启动 JADX 引擎...", "info");
-      const workspacePath = localStorage.getItem("retool_workspace_path");
+        // 更新项目最后使用时间
+        await db.recentProjects.where({ path: existingProjectPath }).modify({ lastUsed: Date.now() });
+      } else {
+        // 2. 执行 JADX
+        addLog("Local", "启动 JADX 引擎...", "info");
+        const workspacePath = localStorage.getItem("retool_workspace_path");
 
-      // 监听 JADX 进度
-      unlistenJadx = await listen("jadx-progress-tick", () => { });
+        // 监听 JADX 进度
+        unlistenJadx = await listen("jadx-progress-tick", () => { });
 
-      const outputDir = (await invoke("jadx_decompile", {
-        apkPath: file.path,
-        outputDir: workspacePath || null,
-      })) as string;
+        outputDir = (await invoke("jadx_decompile", {
+          apkPath: file.path,
+          outputDir: workspacePath || null,
+        })) as string;
 
-      if (unlistenJadx) unlistenJadx();
-      addLog("Local", `反编译完成`, "success");
+        if (unlistenJadx) unlistenJadx();
+        addLog("Local", `反编译完成`, "success");
+
+        // 🔥 保存新项目到数据库
+        const existingProject = await db.recentProjects.where({ path: outputDir }).first();
+        if (!existingProject) {
+          await db.recentProjects.add({
+            name: file.name,
+            path: outputDir,
+            apkPath: file.path,
+            lastUsed: Date.now(),
+            createdAt: Date.now(),
+          });
+          addLog("Local", "📌 项目已保存，下次可直接选择", "info");
+        }
+      }
+
 
       // 更新步骤：JADX 完成，云端开始
       currentTaskSteps.current = [
@@ -733,11 +771,16 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
 
       // 3. 连接云端
       addLog("Local", "正在连接云端大脑...", "info");
-      await new Promise<void>(async (resolve, reject) => {
+      unlistenConnect = await listen("agent-connected-success", () => {
+        // 事件触发时会调用 resolve
+      });
+      await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
           reject("连接云端超时 (15s)，请检查网络");
         }, 15000);
-        unlistenConnect = await listen("agent-connected-success", () => {
+
+        // 重新注册一个监听器来处理成功回调
+        listen("agent-connected-success", () => {
           clearTimeout(timeout);
           addLog("Agent", "✅ 云端连接成功！", "success");
           resolve();
@@ -848,8 +891,10 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
 
     if (pendingFile) {
       const file = pendingFile;
+      const projectPath = pendingProjectPath; // 🔥 获取已选项目路径（如有）
       setPendingFile(null);
-      setTimeout(() => startPipeline(file, currentInput), 100);
+      setPendingProjectPath(null); // 🔥 清除项目路径
+      setTimeout(() => startPipeline(file, currentInput, projectPath || undefined), 100);
     } else {
       if (!activeApkName) {
         message.warning("请先上传一个 APK 文件再开始对话");
@@ -1076,15 +1121,35 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
                 border: "1px solid #eee",
               }}
             >
-              <Tooltip title="上传新 APK">
+              {/* 🔥 改进：下拉菜单选择上传新APK或选择已有项目 */}
+              <Dropdown
+                menu={{
+                  items: [
+                    {
+                      key: 'upload',
+                      icon: <PaperClipOutlined />,
+                      label: '上传新 APK',
+                      onClick: handleSelectFile,
+                    },
+                    {
+                      key: 'existing',
+                      icon: <FileZipOutlined />,
+                      label: '选择已有项目',
+                      onClick: () => setIsProjectModalOpen(true),
+                      disabled: recentProjects.length === 0,
+                    },
+                  ],
+                }}
+                trigger={['click']}
+              >
                 <Button
                   type="text"
                   shape="circle"
                   icon={<PaperClipOutlined />}
-                  onClick={handleSelectFile}
                   style={{ marginBottom: 4 }}
                 />
-              </Tooltip>
+              </Dropdown>
+
               <TextArea
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
@@ -1381,6 +1446,52 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
           </div>
         </div>
       </div>
+
+      {/* 🔥 新增：项目选择模态框 */}
+      <Modal
+        title="📂 选择已有项目"
+        open={isProjectModalOpen}
+        onCancel={() => setIsProjectModalOpen(false)}
+        footer={null}
+        width={600}
+      >
+        <List
+          dataSource={recentProjects}
+          locale={{ emptyText: '暂无历史项目' }}
+          renderItem={(project) => (
+            <List.Item
+              style={{ cursor: 'pointer', padding: '12px 16px', borderRadius: 8 }}
+              onClick={() => {
+                setIsProjectModalOpen(false);
+                // 🔥 修复：只设置待处理状态，等用户点击发送再启动
+                const virtualFile: AppFile = {
+                  name: project.name,
+                  path: project.apkPath || project.path,
+                };
+                setPendingFile(virtualFile);
+                setPendingProjectPath(project.path); // 记住项目路径，发送时传入
+                message.info(`已选择项目：${project.name}，请输入分析指令后发送`);
+              }}
+            >
+
+              <List.Item.Meta
+                avatar={<FileZipOutlined style={{ fontSize: 24, color: '#1890ff' }} />}
+                title={project.name}
+                description={
+                  <div>
+                    <div style={{ fontSize: 11, color: '#888' }}>
+                      📁 {project.path}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#888' }}>
+                      🕐 {new Date(project.lastUsed).toLocaleString()}
+                    </div>
+                  </div>
+                }
+              />
+            </List.Item>
+          )}
+        />
+      </Modal>
     </div>
   );
 };

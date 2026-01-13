@@ -63,12 +63,24 @@ export interface NetworkCapture {
   timestamp: number;
 }
 
+// 🔥 新增：已解包的项目记录
+export interface RecentProject {
+  id?: number;
+  name: string;           // 项目名称 (APK 文件名)
+  path: string;           // 解包后的路径
+  packageName?: string;   // 包名 (从 Manifest 解析)
+  apkPath?: string;       // 原始 APK 路径
+  lastUsed: number;       // 最后使用时间戳
+  createdAt: number;      // 创建时间戳
+}
+
 class MyAppDatabase extends Dexie {
   chatSessions!: Table<ChatSession>;
   chatMessages!: Table<ChatMessage>;
   aiConfigs!: Table<AiConfig>;
   sessionLogs!: Table<SessionLog>;
-  networkCaptures!: Table<NetworkCapture>; // 🔥 新增
+  networkCaptures!: Table<NetworkCapture>;
+  recentProjects!: Table<RecentProject>; // 🔥 新增
 
   constructor() {
     super("ReverseWorkbenchDB");
@@ -93,7 +105,17 @@ class MyAppDatabase extends Dexie {
       chatMessages: "++id, sessionId",
       aiConfigs: "++id, isActive",
       sessionLogs: "++id, sessionId",
-      networkCaptures: "id, sessionId", // 使用 UUID 作为主键
+      networkCaptures: "id, sessionId",
+    });
+
+    // 🔥 Version 6 (New - RecentProjects)
+    this.version(6).stores({
+      chatSessions: "id, lastUpdated",
+      chatMessages: "++id, sessionId",
+      aiConfigs: "++id, isActive",
+      sessionLogs: "++id, sessionId",
+      networkCaptures: "id, sessionId",
+      recentProjects: "++id, path, lastUsed", // 支持按路径和时间查询
     });
   }
 }
