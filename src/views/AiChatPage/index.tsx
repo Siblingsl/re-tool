@@ -1404,94 +1404,163 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
                 color: "#a9b7c6",
               }}
             >
-              {logs
-                .filter(log => logFilter === "all" || log.isKeyResult)
-                .filter(log => !/[\x00-\x1F]/.test(log.msg)) // 🔥 过滤乱码控制字符
-                .map((log, idx) => (
-                  <div
-                    key={idx}
-                    style={{
-                      marginBottom: 4,
-                      padding: "4px 8px",
-                      borderRadius: 4,
-                      background: log.isKeyResult ? "rgba(82, 196, 26, 0.1)" : "transparent",
-                      borderLeft: log.isKeyResult ? "2px solid #52c41a" : "2px solid transparent",
-                    }}
-                  >
-                    <span
-                      style={{
-                        color:
-                          log.source === "Local" ? "#faad14" :
-                            log.source === "Agent" ? "#52c41a" :
-                              log.source === "Device" ? "#1890ff" :
-                                log.source === "Cloud" ? "#eb2f96" : "#888",
-                        marginRight: 6,
-                        fontSize: 10,
-                      }}
-                    >
-                      {/* 🔥 日志来源图标区分 */}
-                      {log.source === "Local" ? "💻" :
-                        log.source === "Agent" ? "🤖" :
-                          log.source === "Device" ? "📱" :
-                            log.source === "Cloud" ? "☁️" : "📋"} [{log.source}]
-                    </span>
-                    <span style={{ color: log.isKeyResult ? "#fff" : "#a9b7c6" }}>
-                      {log.msg.replace(/[\x00-\x1F]/g, "")}
-                    </span>
-                  </div>
+              {/* 🔥 智能聚合日志渲染 */}
+              {(() => {
+                // 1. 过滤日志
+                const filteredLogs = logs
+                  .filter(log => logFilter === "all" || log.isKeyResult)
+                  .filter(log => !/[\x00-\x1F]/.test(log.msg));
 
-                ))}
+                // 2. 智能聚合：相同来源+消息的日志合并
+                const aggregated: { key: string; log: typeof filteredLogs[0]; count: number; isKey: boolean }[] = [];
+                const countMap = new Map<string, number>();
+
+                for (const log of filteredLogs) {
+                  // 对于关键日志，不聚合，每条都显示
+                  if (log.isKeyResult) {
+                    aggregated.push({ key: `key-${log.id}`, log, count: 1, isKey: true });
+                  } else {
+                    // 普通日志按内容聚合
+                    const aggKey = `${log.source}:${log.msg}`;
+                    const existing = countMap.get(aggKey);
+                    if (existing !== undefined) {
+                      // 已存在，只增加计数
+                      const idx = aggregated.findIndex(a => a.key === aggKey);
+                      if (idx >= 0) aggregated[idx].count++;
+                    } else {
+                      // 新日志
+                      countMap.set(aggKey, aggregated.length);
+                      aggregated.push({ key: aggKey, log, count: 1, isKey: false });
+                    }
+                  }
+                }
+
+                // 3. 只显示最后 50 条聚合后的日志（防止卡顿）
+                const displayLogs = aggregated.slice(-50);
+
+                // 4. 统计摘要
+                const keyCount = logs.filter(l => l.isKeyResult).length;
+                const totalCount = logs.length;
+
+                return (
+                  <>
+                    {/* 顶部统计栏 */}
+                    <div style={{
+                      marginBottom: 8,
+                      padding: '6px 10px',
+                      background: '#2d2d2d',
+                      borderRadius: 4,
+                      fontSize: 10,
+                      color: '#888',
+                      display: 'flex',
+                      gap: 16
+                    }}>
+                      <span>📊 总计: <b style={{ color: '#fff' }}>{totalCount}</b></span>
+                      <span>🔑 关键: <b style={{ color: '#52c41a' }}>{keyCount}</b></span>
+                      <span>📦 聚合: <b style={{ color: '#1890ff' }}>{displayLogs.length}</b></span>
+                    </div>
+
+                    {/* 日志列表 */}
+                    {displayLogs.map(({ key, log, count, isKey }) => (
+                      <div
+                        key={key}
+                        style={{
+                          marginBottom: 4,
+                          padding: "4px 8px",
+                          borderRadius: 4,
+                          background: isKey ? "rgba(82, 196, 26, 0.15)" : count > 1 ? "rgba(24, 144, 255, 0.05)" : "transparent",
+                          borderLeft: isKey ? "3px solid #52c41a" : count > 1 ? "3px solid #1890ff" : "2px solid transparent",
+                        }}
+                      >
+                        <span
+                          style={{
+                            color:
+                              log.source === "Local" ? "#faad14" :
+                                log.source === "Agent" ? "#52c41a" :
+                                  log.source === "Device" ? "#1890ff" :
+                                    log.source === "Cloud" ? "#eb2f96" : "#888",
+                            marginRight: 6,
+                            fontSize: 10,
+                          }}
+                        >
+                          {log.source === "Local" ? "💻" :
+                            log.source === "Agent" ? "🤖" :
+                              log.source === "Device" ? "📱" :
+                                log.source === "Cloud" ? "☁️" : "📋"} [{log.source}]
+                        </span>
+                        <span style={{ color: isKey ? "#fff" : "#a9b7c6" }}>
+                          {log.msg.replace(/[\x00-\x1F]/g, "")}
+                        </span>
+                        {/* 🔥 显示重复计数 */}
+                        {count > 1 && (
+                          <span style={{
+                            marginLeft: 8,
+                            fontSize: 9,
+                            color: '#1890ff',
+                            background: 'rgba(24, 144, 255, 0.2)',
+                            padding: '1px 6px',
+                            borderRadius: 10
+                          }}>
+                            ×{count}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </>
+                );
+              })()}
               <div ref={logsEndRef} />
             </div>
+
           </div>
         </div>
       </div>
 
-      {/* 🔥 新增：项目选择模态框 */}
-      <Modal
-        title="📂 选择已有项目"
-        open={isProjectModalOpen}
-        onCancel={() => setIsProjectModalOpen(false)}
-        footer={null}
-        width={600}
-      >
-        <List
-          dataSource={recentProjects}
-          locale={{ emptyText: '暂无历史项目' }}
-          renderItem={(project) => (
-            <List.Item
-              style={{ cursor: 'pointer', padding: '12px 16px', borderRadius: 8 }}
-              onClick={() => {
-                setIsProjectModalOpen(false);
-                // 🔥 修复：只设置待处理状态，等用户点击发送再启动
-                const virtualFile: AppFile = {
-                  name: project.name,
-                  path: project.apkPath || project.path,
-                };
-                setPendingFile(virtualFile);
-                setPendingProjectPath(project.path); // 记住项目路径，发送时传入
-                message.info(`已选择项目：${project.name}，请输入分析指令后发送`);
-              }}
-            >
+       {/* 🔥 新增：项目选择模态框 */ }
+  <Modal
+    title="📂 选择已有项目"
+    open={isProjectModalOpen}
+    onCancel={() => setIsProjectModalOpen(false)}
+    footer={null}
+    width={600}
+  >
+    <List
+      dataSource={recentProjects}
+      locale={{ emptyText: '暂无历史项目' }}
+      renderItem={(project) => (
+        <List.Item
+          style={{ cursor: 'pointer', padding: '12px 16px', borderRadius: 8 }}
+          onClick={() => {
+            setIsProjectModalOpen(false);
+            // 🔥 修复：只设置待处理状态，等用户点击发送再启动
+            const virtualFile: AppFile = {
+              name: project.name,
+              path: project.apkPath || project.path,
+            };
+            setPendingFile(virtualFile);
+            setPendingProjectPath(project.path); // 记住项目路径，发送时传入
+            message.info(`已选择项目：${project.name}，请输入分析指令后发送`);
+          }}
+        >
 
-              <List.Item.Meta
-                avatar={<FileZipOutlined style={{ fontSize: 24, color: '#1890ff' }} />}
-                title={project.name}
-                description={
-                  <div>
-                    <div style={{ fontSize: 11, color: '#888' }}>
-                      📁 {project.path}
-                    </div>
-                    <div style={{ fontSize: 11, color: '#888' }}>
-                      🕐 {new Date(project.lastUsed).toLocaleString()}
-                    </div>
-                  </div>
-                }
-              />
-            </List.Item>
-          )}
-        />
-      </Modal>
+          <List.Item.Meta
+            avatar={<FileZipOutlined style={{ fontSize: 24, color: '#1890ff' }} />}
+            title={project.name}
+            description={
+              <div>
+                <div style={{ fontSize: 11, color: '#888' }}>
+                  📁 {project.path}
+                </div>
+                <div style={{ fontSize: 11, color: '#888' }}>
+                  🕐 {new Date(project.lastUsed).toLocaleString()}
+                </div>
+              </div>
+            }
+          />
+        </List.Item>
+      )}
+    />
+  </Modal>
     </div>
   );
 };
