@@ -74,8 +74,119 @@ const DEFAULT_SCRIPTS: ScriptItem[] = [
             });
         `,
   },
-  { id: "4", desc: "", name: "自定义 Hook", code: "// 在此编写你的代码" },
+  {
+    id: "4",
+    name: "动态类加载监控",
+    desc: "监控 DexClassLoader/PathClassLoader 动态加载",
+    code: `
+// 🔥 动态类加载监控 - 用于分析热更新、插件化框架
+Java.perform(function () {
+    console.log("[ClassLoader Monitor] Starting...");
+
+    // Hook DexClassLoader 构造函数
+    var DexClassLoader = Java.use("dalvik.system.DexClassLoader");
+    DexClassLoader.$init.overload('java.lang.String', 'java.lang.String', 'java.lang.String', 'java.lang.ClassLoader').implementation = function (dexPath, optimizedDirectory, librarySearchPath, parent) {
+        console.log("[🔥 DexClassLoader] 加载新 DEX:");
+        console.log("    dexPath: " + dexPath);
+        console.log("    optimizedDir: " + optimizedDirectory);
+        console.log("    libPath: " + librarySearchPath);
+        return this.$init(dexPath, optimizedDirectory, librarySearchPath, parent);
+    };
+
+    // Hook PathClassLoader 构造函数
+    var PathClassLoader = Java.use("dalvik.system.PathClassLoader");
+    PathClassLoader.$init.overload('java.lang.String', 'java.lang.ClassLoader').implementation = function (dexPath, parent) {
+        console.log("[🔥 PathClassLoader] 加载路径: " + dexPath);
+        return this.$init(dexPath, parent);
+    };
+
+    // Hook InMemoryDexClassLoader (Android 8.0+，内存加载)
+    try {
+        var InMemoryDexClassLoader = Java.use("dalvik.system.InMemoryDexClassLoader");
+        InMemoryDexClassLoader.$init.overload('java.nio.ByteBuffer', 'java.lang.ClassLoader').implementation = function (buffer, parent) {
+            console.log("[🔥 InMemoryDexClassLoader] 内存加载 DEX! 大小: " + buffer.capacity() + " bytes");
+            return this.$init(buffer, parent);
+        };
+    } catch (e) {
+        console.log("[Info] InMemoryDexClassLoader 不可用 (Android < 8.0)");
+    }
+
+    // Hook ClassLoader.loadClass - 监控所有类加载
+    var ClassLoader = Java.use("java.lang.ClassLoader");
+    ClassLoader.loadClass.overload('java.lang.String').implementation = function (className) {
+        // 过滤系统类，只打印业务类
+        if (className.indexOf("com.") === 0 || className.indexOf("cn.") === 0 || 
+            className.indexOf("net.") === 0 || className.indexOf("org.") === 0) {
+            console.log("[ClassLoader] loadClass: " + className);
+        }
+        return this.loadClass(className);
+    };
+
+    // Hook Class.forName - 反射加载类
+    var JavaClass = Java.use("java.lang.Class");
+    JavaClass.forName.overload('java.lang.String').implementation = function (className) {
+        if (className.indexOf("com.") === 0 || className.indexOf("cn.") === 0) {
+            console.log("[Class.forName] 反射加载: " + className);
+        }
+        return this.forName(className);
+    };
+
+    console.log("[ClassLoader Monitor] Hooks 已注入!");
+});
+        `,
+  },
+  {
+    id: "5",
+    name: "Dex 文件 Dump",
+    desc: "发现动态加载的 Dex 时自动保存到 /sdcard",
+    code: `
+// 🔥 Dex 文件 Dump - 配合动态类加载监控使用
+Java.perform(function () {
+    console.log("[Dex Dumper] Starting...");
+
+    var dexCount = 0;
+
+    var DexClassLoader = Java.use("dalvik.system.DexClassLoader");
+    DexClassLoader.$init.overload('java.lang.String', 'java.lang.String', 'java.lang.String', 'java.lang.ClassLoader').implementation = function (dexPath, optimizedDirectory, librarySearchPath, parent) {
+        dexCount++;
+        console.log("[🔥 Dex Dump] 发现 DEX #" + dexCount + ": " + dexPath);
+        
+        // 复制 Dex 文件到 /sdcard
+        try {
+            var File = Java.use("java.io.File");
+            var FileInputStream = Java.use("java.io.FileInputStream");
+            var FileOutputStream = Java.use("java.io.FileOutputStream");
+            
+            var srcFile = File.$new(dexPath);
+            var dstPath = "/sdcard/dumped_dex_" + dexCount + ".dex";
+            var dstFile = File.$new(dstPath);
+            
+            var fis = FileInputStream.$new(srcFile);
+            var fos = FileOutputStream.$new(dstFile);
+            
+            var buffer = Java.array('byte', new Array(4096).fill(0));
+            var len;
+            while ((len = fis.read(buffer)) > 0) {
+                fos.write(buffer, 0, len);
+            }
+            fis.close();
+            fos.close();
+            
+            console.log("[✅ Dumped] 保存到: " + dstPath);
+        } catch (e) {
+            console.log("[❌ Dump Failed] " + e);
+        }
+        
+        return this.$init(dexPath, optimizedDirectory, librarySearchPath, parent);
+    };
+
+    console.log("[Dex Dumper] Ready!");
+});
+        `,
+  },
+  { id: "6", desc: "", name: "自定义 Hook", code: "// 在此编写你的代码" },
 ];
+
 
 const App: React.FC = () => {
   const [currentView, setCurrentView] = useState<ViewMode>("device");
@@ -155,9 +266,9 @@ const App: React.FC = () => {
     devices.find((d) => d.id === selectedDeviceId) || devices[0];
   const currentDevice = rawDevice
     ? {
-        ...rawDevice,
-        name: deviceAliases[rawDevice.id] || rawDevice.name,
-      }
+      ...rawDevice,
+      name: deviceAliases[rawDevice.id] || rawDevice.name,
+    }
     : undefined;
 
   return (
