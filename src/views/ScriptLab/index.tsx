@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import Editor from "@monaco-editor/react";
-import { Layout, List, Button, message, Space } from "antd";
+import { Layout, List, Button, message, Space, Modal, Radio } from "antd";
+
 import {
   PlayCircleOutlined,
   SnippetsOutlined,
@@ -53,6 +54,12 @@ const ScriptLab: React.FC<ScriptLabProps> = ({
     };
   }, []);
 
+  // 🔥 新增：进程选择相关状态
+  const [processes, setProcesses] = useState<{ pid: number, name: string, is_main: boolean }[]>([]);
+  const [selectedPid, setSelectedPid] = useState<number | null>(null);
+  const [showProcessModal, setShowProcessModal] = useState(false);
+  const [pendingRun, setPendingRun] = useState<{ deviceId: string, pkg: string } | null>(null);
+
   const handleRun = async () => {
     setIsRunning(true);
     setLogs([]); // 每次运行前清空日志
@@ -82,14 +89,25 @@ const ScriptLab: React.FC<ScriptLabProps> = ({
       });
       setLogs((prev) => [...prev, `[System] Target App: ${currentPkg}`]);
 
-      await invoke("run_frida_script", {
+      // 🔥 枚举目标 App 的所有进程
+      const procs = await invoke<{ pid: number, name: string, is_main: boolean }[]>("list_app_processes", {
         deviceId: targetDevice,
         packageName: currentPkg,
-        scriptContent: code,
       });
 
-      // 注意：run_frida_script 返回就代表启动成功了，后续日志是异步来的
-      message.success("注入成功！");
+      // 如果有多个进程，弹出选择框
+      if (procs.length > 1) {
+        setProcesses(procs);
+        setPendingRun({ deviceId: targetDevice!, pkg: currentPkg });
+        setShowProcessModal(true);
+        setIsRunning(false);
+        return;
+      }
+
+      // 单进程直接注入
+      await executeInjection(targetDevice!, currentPkg, procs.length > 0 ? procs[0].pid : null);
+
+
     } catch (e: any) {
       message.error("执行失败");
       setLogs((prev) => [...prev, `[Error] ${e}`]);
@@ -97,6 +115,39 @@ const ScriptLab: React.FC<ScriptLabProps> = ({
       setIsRunning(false);
     }
   };
+
+  // 🔥 实际执行注入
+  const executeInjection = async (deviceId: string, pkg: string, pid: number | null) => {
+    try {
+      if (pid) {
+        setLogs((prev) => [...prev, `[System] Injecting into PID: ${pid}`]);
+      }
+
+      await invoke("run_frida_script", {
+        deviceId: deviceId,
+        packageName: pkg,
+        scriptContent: code,
+        targetPid: pid, // 🔥 传入目标 PID
+      });
+
+      message.success("注入成功！");
+    } catch (e: any) {
+      message.error("注入失败");
+      setLogs((prev) => [...prev, `[Error] ${e}`]);
+    }
+  };
+
+  // 🔥 处理进程选择确认
+  const handleProcessSelect = async () => {
+    if (!pendingRun || selectedPid === null) return;
+    setShowProcessModal(false);
+    setIsRunning(true);
+    await executeInjection(pendingRun.deviceId, pendingRun.pkg, selectedPid);
+    setIsRunning(false);
+    setPendingRun(null);
+    setSelectedPid(null);
+  };
+
 
   return (
     <Layout style={{ height: "100%", background: "#fff" }}>
@@ -209,8 +260,8 @@ const ScriptLab: React.FC<ScriptLabProps> = ({
                   color: log.includes("[Error]")
                     ? "#ff4d4f"
                     : log.includes("[System]")
-                    ? "#52c41a"
-                    : "inherit",
+                      ? "#52c41a"
+                      : "inherit",
                 }}
               >
                 {log}
@@ -229,6 +280,43 @@ const ScriptLab: React.FC<ScriptLabProps> = ({
             )
           }
         />
+
+        {/* 🔥 多进程选择 Modal */}
+        <Modal
+          title="选择目标进程"
+          open={showProcessModal}
+          onOk={handleProcessSelect}
+          onCancel={() => {
+            setShowProcessModal(false);
+            setPendingRun(null);
+            setSelectedPid(null);
+          }}
+          okButtonProps={{ disabled: selectedPid === null }}
+        >
+          <p style={{ marginBottom: 16 }}>检测到该应用有多个进程，请选择要注入的进程：</p>
+          <Radio.Group
+            value={selectedPid}
+            onChange={(e) => setSelectedPid(e.target.value)}
+            style={{ width: "100%" }}
+          >
+            {processes.map((proc) => (
+              <Radio
+                key={proc.pid}
+                value={proc.pid}
+                style={{ display: "block", marginBottom: 8 }}
+              >
+                <span style={{ fontWeight: proc.is_main ? 600 : 400 }}>
+                  {proc.name}
+                </span>
+                <span style={{ color: "#999", marginLeft: 8 }}>
+                  (PID: {proc.pid})
+                  {proc.is_main && <span style={{ color: "#52c41a", marginLeft: 8 }}>主进程</span>}
+                </span>
+              </Radio>
+            ))}
+          </Radio.Group>
+        </Modal>
+
       </Content>
     </Layout>
   );

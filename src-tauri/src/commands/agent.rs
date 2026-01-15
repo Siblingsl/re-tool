@@ -328,9 +328,11 @@ async fn dispatch_command(app: &AppHandle, action: &str, params: Value) -> Resul
                 device_id, 
                 package.to_string(), 
                 script.to_string(),
-                mode,           // 🔥 新增：spawn/attach 模式
-                session_id      // 🔥 新增：用于日志同步
+                mode,           // 🔥 spawn/attach 模式
+                session_id,     // 🔥 用于日志同步
+                None            // 🔥 target_pid - 多进程注入时使用
             ).await.map_err(|e| e.to_string())?;
+
             
             Ok(json!(result)) 
         }

@@ -169,6 +169,67 @@ pub async fn check_modded_frida_running(device_id: String) -> Result<bool, Strin
 
 
 // =====================================================
+// 🔥 多进程注入：列出 App 的所有进程
+// =====================================================
+#[derive(serde::Serialize)]
+pub struct ProcessInfo {
+    pub pid: u32,
+    pub name: String,
+    pub is_main: bool, // 是否为主进程
+}
+
+#[tauri::command]
+pub async fn list_app_processes(device_id: String, package_name: String) -> Result<Vec<ProcessInfo>, String> {
+    // 使用 frida-ps -U 列出设备上的所有进程
+    let device_arg = if device_id.is_empty() || device_id == "usb" {
+        "-U".to_string()
+    } else if device_id.contains(":") || device_id.contains(".") {
+        format!("-D{}", device_id)
+    } else {
+        "-U".to_string()
+    };
+    
+    let output = create_command("frida-ps")
+        .args(&[&device_arg])
+        .output()
+        .map_err(|e| format!("frida-ps 执行失败: {}", e))?;
+    
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("frida-ps 失败: {}", stderr));
+    }
+    
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut processes = Vec::new();
+    
+    // 解析 frida-ps 输出，格式为: "  PID  Name"
+    for line in stdout.lines().skip(1) { // 跳过标题行
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let pid_str = parts[0];
+            let name = parts[1..].join(" ");
+            
+            // 只筛选匹配包名的进程
+            if name.starts_with(&package_name) {
+                if let Ok(pid) = pid_str.parse::<u32>() {
+                    let is_main = name == package_name; // 主进程名称等于包名
+                    processes.push(ProcessInfo {
+                        pid,
+                        name,
+                        is_main,
+                    });
+                }
+            }
+        }
+    }
+    
+    // 按主进程优先排序
+    processes.sort_by(|a, b| b.is_main.cmp(&a.is_main));
+    
+    Ok(processes)
+}
+
+// =====================================================
 // 🔥 核心修复：增强版 Frida 脚本执行
 // =====================================================
 #[tauri::command]
@@ -177,8 +238,9 @@ pub async fn run_frida_script(
     device_id: String, 
     package_name: String, 
     script_content: String,
-    mode: Option<String>,       // 🔥 新增：spawn / attach
-    session_id: Option<String>  // 🔥 新增：用于日志同步
+    mode: Option<String>,       // 🔥 spawn / attach
+    session_id: Option<String>, // 🔥 用于日志同步
+    target_pid: Option<u32>     // 🔥 多进程注入：指定目标进程 PID
 ) -> Result<String, String> {
     // 0. 先停止之前的 Frida 进程（如果有）
     stop_frida_internal();
@@ -204,17 +266,21 @@ pub async fn run_frida_script(
         "-U".to_string()
     };
 
-    // 3. 🔥 根据 mode 决定注入方式
+    // 3. 🔥 根据 mode 和 target_pid 决定注入方式
     let inject_mode = mode.unwrap_or_else(|| "spawn".to_string());
     
     let mut cmd = create_command("frida");
     cmd.arg(&device_arg);
     
-    if inject_mode == "spawn" {
+    // 🔥 多进程支持：如果指定了 PID，直接使用 -p 参数
+    if let Some(pid) = target_pid {
+        cmd.arg("-p").arg(pid.to_string()); // 使用 PID 注入
+    } else if inject_mode == "spawn" {
         cmd.arg("-f").arg(&package_name); // Spawn 模式：重启 App
     } else {
         cmd.arg("-n").arg(&package_name); // Attach 模式：附加到运行中的进程
     }
+
     
     cmd.arg("-l").arg(&script_path);
     cmd.stdout(Stdio::piped());
