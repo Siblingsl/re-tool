@@ -434,6 +434,38 @@ async fn dispatch_command(app: &AppHandle, action: &str, params: Value) -> Resul
             println!("[Agent] ✅ Found {} exported symbols", exports.len());
             Ok(json!(exports))
         },
+        // ✅ [新增] 拉取脱壳文件
+        "PULL_APP_DUMPS" => {
+            let package = params["package"].as_str().ok_or("Missing package")?;
+            let device_id = params["deviceId"].as_str().unwrap_or("").to_string();
+            
+            println!("[Agent] 📥 Pulling dumps for package: {}", package);
+            
+            // 确保 device_id 存在，如果为空则尝试获取第一个连接的设备
+            let target_device = if device_id.is_empty() {
+                // 这里简化处理，如果为空则报错，因为 Agent 应该知道 deviceId
+                return Err("Missing deviceId".to_string());
+            } else {
+                device_id
+            };
+
+            let result = commands::apk::pull_and_organize_dex(target_device, package.to_string())
+                .await.map_err(|e| e.to_string())?;
+                
+            Ok(json!({ "path": result, "message": "Dump files pulled successfully" }))
+        },
+        // ✅ [新增] JADX 反编译
+        "JADX_DECOMPILE" => {
+            let path = params["path"].as_str().ok_or("Missing path")?;
+            let output_dir = params["outputDir"].as_str().map(|s| s.to_string());
+            
+            println!("[Agent] 🔧 JADX Decompile Request: {}", path);
+            
+            let result = commands::apk::jadx_decompile(app.clone(), path.to_string(), output_dir)
+                .await.map_err(|e| e.to_string())?;
+            
+            Ok(json!({ "outputDir": result, "message": "Decompilation successful" }))
+        }
         _ => Err(format!("Unknown action: {}", action)),
     }
 }

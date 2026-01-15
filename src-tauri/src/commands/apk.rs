@@ -270,10 +270,27 @@ pub async fn pull_and_organize_dex(device_id: String, pkg: String) -> Result<Str
     fs::create_dir_all(&local_save_path).map_err(|e| e.to_string())?;
     let local_save_str = local_save_path.to_string_lossy().to_string();
     let remote_tmp = format!("/data/local/tmp/{}_dump", pkg);
-    cmd_exec("adb", &["-s", &device_id, "shell", "su", "-c", &format!("rm -rf {}; cp -r {} {}", remote_tmp, remote_dump_dir, remote_tmp)])?;
-    cmd_exec("adb", &["-s", &device_id, "shell", "su", "-c", &format!("chmod -R 777 {}", remote_tmp)])?;
+    
+    // 1. 尝试直接拉取 remote_tmp (适配手动脚本 dump 到 /data/local/tmp 的情况)
+    let check_tmp_res = cmd_exec("adb", &["-s", &device_id, "shell", &format!("ls {}", remote_tmp)]);
+    let tmp_exists = check_tmp_res.is_ok() && !check_tmp_res.unwrap().contains("No such file");
+
+    if !tmp_exists {
+        // 2. 如果 tmp 不存在，尝试从 App 数据目录复制 (适配 frida-dexdump 默认行为)
+        println!("Tmp dump not found, trying data directory...");
+        cmd_exec("adb", &["-s", &device_id, "shell", "su", "-c", &format!("cp -r {} {}", remote_dump_dir, remote_tmp)])?;
+        cmd_exec("adb", &["-s", &device_id, "shell", "su", "-c", &format!("chmod -R 777 {}", remote_tmp)])?;
+    } else {
+        // 确保权限
+        cmd_exec("adb", &["-s", &device_id, "shell", "su", "-c", &format!("chmod -R 777 {}", remote_tmp)])?;
+    }
+
     let pull_res = cmd_exec("adb", &["-s", &device_id, "pull", &remote_tmp, &local_save_str])?;
+    
+    // 只有在是我们自己复制出来的情况下才清理，或者始终保留？为了安全起见，可以选择不清理或者询问用户。
+    // 这里保持清理逻辑，但只清理 tmp
     cmd_exec("adb", &["-s", &device_id, "shell", "rm -rf", &remote_tmp])?;
+
     if let Ok(entries) = fs::read_dir(&local_save_path) {
         let mut index = 1;
         for entry in entries.flatten() {
