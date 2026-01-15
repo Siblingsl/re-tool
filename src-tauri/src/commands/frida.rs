@@ -103,6 +103,7 @@ pub async fn deploy_tool(device_id: String, tool_id: String, version: String, ar
     }
 }
 
+
 // 检查 Frida Server 是否正在运行
 #[tauri::command]
 pub async fn check_frida_running(device_id: String) -> Result<bool, String> {
@@ -133,6 +134,39 @@ pub async fn check_frida_running(device_id: String) -> Result<bool, String> {
 
     Ok(false)
 }
+
+// 🔥 检查魔改版 Frida Server 是否正在运行
+#[tauri::command]
+pub async fn check_modded_frida_running(device_id: String) -> Result<bool, String> {
+    let output = create_command("adb")
+        .args(&["-s", &device_id, "shell", "pidof", "modded-frida-server"])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if !stdout.trim().is_empty() {
+            return Ok(true);
+        }
+    }
+
+    // 备用检测方式
+    let fallback_cmd = "ps -A | grep modded-frida-server | grep -v grep";
+    let output_fallback = create_command("adb")
+        .args(&["-s", &device_id, "shell", fallback_cmd])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if output_fallback.status.success() {
+        let stdout = String::from_utf8_lossy(&output_fallback.stdout);
+        if !stdout.trim().is_empty() {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
 
 // =====================================================
 // 🔥 核心修复：增强版 Frida 脚本执行

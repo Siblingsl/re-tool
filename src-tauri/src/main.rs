@@ -80,9 +80,12 @@ fn main() {
             frida::check_frida_installed,
             frida::deploy_tool,
             frida::check_frida_running,
+            frida::check_modded_frida_running,  // 🔥 检查魔改版 Frida 状态
+
             frida::run_frida_script,
             frida::stop_frida_script,    // 🔥 新增
             frida::is_frida_alive,       // 🔥 新增
+
 
             // --- APK Tools (Local) ---
             apk::apk_decode,

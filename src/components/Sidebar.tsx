@@ -42,7 +42,9 @@ import {
   BgColorsOutlined,
   CheckCircleFilled,
   ExclamationCircleFilled,
+  RocketOutlined, // 🔥 魔改版 Frida 图标
 } from "@ant-design/icons";
+
 import {
   Avatar,
   Button,
@@ -183,9 +185,13 @@ const Sidebar: React.FC<SidebarProps> = ({
   const [fridaStatusMap, setFridaStatusMap] = useState<Record<string, boolean>>(
     {}
   );
+  const [moddedFridaStatusMap, setModdedFridaStatusMap] = useState<Record<string, boolean>>(
+    {}
+  ); // 🔥 魔改版 Frida 状态追踪
   const [rootStatusMap, setRootStatusMap] = useState<Record<string, boolean>>(
     {}
   );
+
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
@@ -219,6 +225,14 @@ const Sidebar: React.FC<SidebarProps> = ({
     const savedPath = localStorage.getItem("retool_workspace_path");
     if (savedPath) setWorkspacePath(savedPath);
   }, []);
+
+  // 🔥 新增：切换到工具配置标签时自动获取最新 Frida 版本
+  useEffect(() => {
+    if (activeSettingTab === "tools") {
+      fetchFridaVersions();
+    }
+  }, [activeSettingTab]);
+
 
   // ✅ 新增：选择工作区文件夹
   const handleSelectWorkspace = async () => {
@@ -333,17 +347,41 @@ const Sidebar: React.FC<SidebarProps> = ({
     setFridaStatusMap((prev) => ({ ...prev, ...statusMap }));
   };
 
+  // 🔥 检查所有设备的魔改版 Frida 运行状态
+  const checkAllModdedFridaStatus = async () => {
+    const statusMap: Record<string, boolean> = {};
+    await Promise.all(
+      devices.map(async (dev) => {
+        if (dev.type === "android" && dev.status === "online") {
+          try {
+            const isRunning = await invoke<boolean>("check_modded_frida_running", {
+              deviceId: dev.id,
+            });
+            statusMap[dev.id] = isRunning;
+          } catch (e) {
+            statusMap[dev.id] = false;
+          }
+        }
+      })
+    );
+    setModdedFridaStatusMap((prev) => ({ ...prev, ...statusMap }));
+  };
+
+
   useEffect(() => {
     if (devices.length > 0) {
       checkAllFridaStatus();
+      checkAllModdedFridaStatus();
       checkAllRootStatus();
     }
     const timer = setInterval(() => {
       checkAllFridaStatus();
+      checkAllModdedFridaStatus();
       checkAllRootStatus();
     }, 5000);
     return () => clearInterval(timer);
   }, [devices]);
+
 
   // ... (keeping other helper functions like fetchFridaVersions, detectAbi, etc. exactly the same) ...
   const fetchFridaVersions = async () => {
@@ -477,7 +515,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                       "su -c 'pkill -f frida-server'",
                     ],
                   });
-                } catch (e) {}
+                } catch (e) { }
                 await invoke("run_command", {
                   cmd: "adb",
                   args: [
@@ -715,6 +753,71 @@ const Sidebar: React.FC<SidebarProps> = ({
     }
   };
 
+  // 🔥 启动魔改版 Frida Server
+  const handleStartModdedFrida = async (device: Device) => {
+    const hideCheckLoading = message.loading("正在检测魔改版 Frida 环境...", 0);
+    try {
+      // 检查 modded-frida-server 是否已安装
+      const checkResult = await invoke<string>("run_command", {
+        cmd: "adb",
+        args: ["-s", device.id, "shell", "ls /data/local/tmp/modded-frida-server"],
+      });
+      hideCheckLoading();
+
+      if (checkResult.includes("No such file")) {
+        Modal.warning({
+          title: "未安装魔改版 Frida Server",
+          content: (
+            <div>
+              <p>设备上未检测到 modded-frida-server 文件。</p>
+              <p>请先编译魔改版 Frida 并推送到 <b>/data/local/tmp/modded-frida-server</b>。</p>
+            </div>
+          ),
+        });
+        return;
+      }
+
+      const hideStartLoading = message.loading("正在启动魔改版 Frida Server...", 0);
+      await invoke("run_command", {
+        cmd: "adb",
+        args: [
+          "-s",
+          device.id,
+          "shell",
+          "su -c 'setenforce 0; chmod 755 /data/local/tmp/modded-frida-server; nohup /data/local/tmp/modded-frida-server > /dev/null 2>&1 &'",
+        ],
+      });
+      setTimeout(async () => {
+        hideStartLoading();
+        checkAllModdedFridaStatus();
+        message.success("魔改版 Frida Server 已启动！");
+      }, 2000);
+    } catch (e) {
+      hideCheckLoading();
+      message.error("启动魔改版 Frida 失败");
+    }
+  };
+
+  // 🔥 停止魔改版 Frida Server
+  const handleStopModdedFrida = async (device: Device) => {
+    const hideLoading = message.loading("正在停止魔改版 Frida Server...", 0);
+    try {
+      await invoke("run_command", {
+        cmd: "adb",
+        args: ["-s", device.id, "shell", "su -c 'pkill -f modded-frida-server'"],
+      });
+      setTimeout(() => {
+        hideLoading();
+        message.success("魔改版 Frida Server 已停止");
+        checkAllModdedFridaStatus();
+      }, 1000);
+    } catch (e) {
+      hideLoading();
+      message.error("停止失败");
+    }
+  };
+
+
   const getDeviceMenuItems = (device: Device): MenuProps["items"] => [
     {
       key: "show",
@@ -743,32 +846,47 @@ const Sidebar: React.FC<SidebarProps> = ({
     { type: "divider" },
     device.type === "android"
       ? {
-          key: "frida_control",
-          label: fridaStatusMap[device.id]
-            ? "停止 Frida Server"
-            : "启动 Frida Server",
-          icon: fridaStatusMap[device.id] ? (
-            <StopOutlined style={{ color: "#ff4d4f" }} />
-          ) : (
-            <PlayCircleOutlined style={{ color: "#52c41a" }} />
-          ),
-          danger: fridaStatusMap[device.id],
-          onClick: () => {
-            if (fridaStatusMap[device.id]) {
-              handleStopFrida(device);
-            } else {
-              handleStartFrida(device);
-            }
-          },
-        }
+        key: "frida_control",
+        label: fridaStatusMap[device.id]
+          ? "停止 Frida Server"
+          : "启动 Frida Server",
+        icon: fridaStatusMap[device.id] ? (
+          <StopOutlined style={{ color: "#ff4d4f" }} />
+        ) : (
+          <PlayCircleOutlined style={{ color: "#52c41a" }} />
+        ),
+        danger: fridaStatusMap[device.id],
+        onClick: () => {
+          if (fridaStatusMap[device.id]) {
+            handleStopFrida(device);
+          } else {
+            handleStartFrida(device);
+          }
+        },
+      }
       : null,
-    {
-      key: "deploy",
-      label: "部署调试工具",
-      icon: <ToolOutlined />,
-      onClick: () => openToolModal(device),
-    },
+    // 🔥 魔改版 Frida Server 控制
+    device.type === "android"
+      ? {
+        key: "modded_frida_control",
+        label: moddedFridaStatusMap[device.id]
+          ? "停止魔改版 Frida"
+          : "启动魔改版 Frida",
+        icon: <RocketOutlined style={{ color: moddedFridaStatusMap[device.id] ? "#ff4d4f" : "#722ed1" }} />,
+        danger: moddedFridaStatusMap[device.id],
+        onClick: () => {
+          if (moddedFridaStatusMap[device.id]) {
+            handleStopModdedFrida(device);
+          } else {
+            handleStartModdedFrida(device);
+          }
+        },
+
+      }
+      : null,
+
     { type: "divider" },
+
     { key: "copy-id", label: "复制 ID", icon: <CopyOutlined /> },
     { key: "copy-name", label: "复制名称", icon: <CopyOutlined /> },
     { type: "divider" },
@@ -1105,11 +1223,10 @@ const Sidebar: React.FC<SidebarProps> = ({
             placement="right"
           >
             <div
-              className={`nav-item-split ${
-                currentView === "device" && selectedDeviceId === dev.id
-                  ? "active"
-                  : ""
-              }`}
+              className={`nav-item-split ${currentView === "device" && selectedDeviceId === dev.id
+                ? "active"
+                : ""
+                }`}
               style={{
                 padding: collapsed ? "4px" : undefined,
                 justifyContent: collapsed ? "center" : "space-between",
@@ -1576,8 +1693,8 @@ const Sidebar: React.FC<SidebarProps> = ({
                         {installConfig.arch === "arm64"
                           ? "arm64-v8a (64位)"
                           : installConfig.arch === "arm"
-                          ? "armeabi-v7a (32位)"
-                          : installConfig.arch}
+                            ? "armeabi-v7a (32位)"
+                            : installConfig.arch}
                       </Tag>
                     </div>
                     <Form layout="inline" size="small">
@@ -1824,8 +1941,8 @@ const Sidebar: React.FC<SidebarProps> = ({
                           {themeName === "Light"
                             ? "明亮"
                             : themeName === "Dark"
-                            ? "暗黑"
-                            : "跟随系统"}
+                              ? "暗黑"
+                              : "跟随系统"}
                         </span>
                       </div>
                     ))}
@@ -1981,14 +2098,13 @@ const Sidebar: React.FC<SidebarProps> = ({
                 <h3 style={{ marginBottom: 24 }}>工具配置</h3>
                 <Form layout="vertical">
                   <Form.Item label="Frida Server 默认版本">
-                    <Select defaultValue="16.2.1">
-                      <Select.Option value="16.2.1">
-                        16.2.1 (Stable) - 推荐
-                      </Select.Option>
-                      <Select.Option value="16.1.4">16.1.4</Select.Option>
-                      <Select.Option value="15.2.2">
-                        15.2.2 (Legacy)
-                      </Select.Option>
+                    <Select
+                      value={installConfig.version}
+                      onChange={(v) => setInstallConfig(prev => ({ ...prev, version: v }))}
+                    >
+                      {fridaVersions.map(v => (
+                        <Select.Option key={v} value={v}>{v}</Select.Option>
+                      ))}
                     </Select>
                     <div style={{ fontSize: 12, color: "#999", marginTop: 4 }}>
                       向设备部署 Frida 时默认选中的版本
@@ -2001,9 +2117,94 @@ const Sidebar: React.FC<SidebarProps> = ({
                       <Radio value="fernflower">Fernflower (IDEA 内置)</Radio>
                     </Radio.Group>
                   </Form.Item>
+
+                  <Divider />
+
+                  {/* 🔥 新增：部署调试工具区域 */}
+                  <h4 style={{ marginBottom: 16 }}>部署调试工具</h4>
+
+                  <Form.Item label="选择目标设备">
+                    <Select
+                      placeholder="请选择设备"
+                      value={currentToolDevice?.id}
+                      onChange={(deviceId) => {
+                        const dev = devices.find(d => d.id === deviceId);
+                        if (dev) {
+                          setCurrentToolDevice(dev);
+                          detectAbi(dev);
+                        }
+                      }}
+                    >
+                      {devices.filter(d => d.type === "android").map(dev => (
+                        <Select.Option key={dev.id} value={dev.id}>
+                          {deviceAliases[dev.id] || dev.name}
+                        </Select.Option>
+                      ))}
+                    </Select>
+                  </Form.Item>
+
+                  <Form.Item label="设备架构">
+                    <Select
+                      value={installConfig.arch}
+                      onChange={(v) => setInstallConfig(prev => ({ ...prev, arch: v }))}
+                    >
+                      <Select.Option value="arm64">arm64 (推荐)</Select.Option>
+                      <Select.Option value="arm">arm</Select.Option>
+                      <Select.Option value="x86_64">x86_64</Select.Option>
+                      <Select.Option value="x86">x86</Select.Option>
+                    </Select>
+                  </Form.Item>
+
+                  <div style={{ display: "flex", gap: 12, marginTop: 16 }}>
+                    <Button
+                      type="primary"
+                      icon={<BugOutlined />}
+                      disabled={!currentToolDevice}
+                      onClick={() => {
+                        const fridaTool = toolsList.find(t => t.id === "frida");
+                        if (fridaTool) handleDeployTool(fridaTool);
+                      }}
+                    >
+                      部署 Frida Server
+                    </Button>
+                    <Button
+                      icon={<RocketOutlined />}
+                      onClick={() => {
+                        Modal.info({
+                          title: "编译 Frida Server 魔改版",
+                          width: 500,
+                          content: (
+                            <div>
+                              <p>魔改版 Frida 需要从源码编译以绕过检测。</p>
+                              <p style={{ marginTop: 12 }}>推荐方案：</p>
+                              <ul style={{ paddingLeft: 20 }}>
+                                <li>修改 Frida 特征字符串 (frida → fr1da)</li>
+                                <li>修改端口号 (27042 → 随机)</li>
+                                <li>修改二进制名称 (frida-server → myserver)</li>
+                              </ul>
+                              <p style={{ marginTop: 12, color: "#999" }}>
+                                详细教程请参考：
+                                <a href="https://github.com/AbiaoProject/frida-builder" target="_blank" rel="noreferrer">
+                                  Frida Builder
+                                </a>
+                              </p>
+                            </div>
+                          ),
+                        });
+                      }}
+                    >
+                      编译 Frida Server 魔改版
+                    </Button>
+                  </div>
+
+                  <div style={{ fontSize: 12, color: "#999", marginTop: 8 }}>
+                    魔改版 Frida 通过修改特征字符串和端口号来绕过部分检测。
+                  </div>
+
                 </Form>
               </div>
             )}
+
 
             {/* ai配置 */}
             {activeSettingTab === "ai" && (
