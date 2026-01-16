@@ -330,7 +330,8 @@ async fn dispatch_command(app: &AppHandle, action: &str, params: Value) -> Resul
                 script.to_string(),
                 mode,           // 🔥 spawn/attach 模式
                 session_id,     // 🔥 用于日志同步
-                None            // 🔥 target_pid - 多进程注入时使用
+                None,           // 🔥 target_pid - 多进程注入时使用
+                params["antiDetection"].as_bool() // 🔥 反检测模式
             ).await.map_err(|e| e.to_string())?;
 
             

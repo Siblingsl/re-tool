@@ -99,8 +99,30 @@ pub async fn deploy_tool(device_id: String, tool_id: String, version: String, ar
             }
             Ok(format!("Frida ({}) 部署成功", version))
         },
-        _ => Err("暂不支持".to_string())
+        "hluda" => {
+             // 允许用户部署本地的 hluda-server
+             // 这里的 version 当作本地文件路径处理，或者我们预设一个名字
+             let target_path = "/data/local/tmp/hluda-server";
+             Ok(format!("请手动推送 hluda-server 到 {}", target_path))
+        },
+        _ => Err(format!("不支持的工具: {}", tool_id))
     }
+}
+
+#[tauri::command]
+pub async fn deploy_stealth_frida(device_id: String, version: String, arch: String) -> Result<String, String> {
+    // 1. 下载或获取标准 Frida
+    let local_path = download_frida(&version, &arch).await?;
+    
+    // 2. 生成随机名称 (e.g., "sys_svc_manager")
+    let stealth_name = "sys_svc_mgr"; 
+    let target_path = format!("/data/local/tmp/{}", stealth_name);
+    
+    // 3. Push
+    cmd_exec("adb", &["-s", &device_id, "push", &local_path, &target_path])?;
+    cmd_exec("adb", &["-s", &device_id, "shell", "chmod", "777", &target_path])?;
+    
+    Ok(format!("隐身版 Frida 已部署: {}", target_path))
 }
 
 
@@ -240,7 +262,8 @@ pub async fn run_frida_script(
     script_content: String,
     mode: Option<String>,       // 🔥 spawn / attach
     session_id: Option<String>, // 🔥 用于日志同步
-    target_pid: Option<u32>     // 🔥 多进程注入：指定目标进程 PID
+    target_pid: Option<u32>,     // 🔥 多进程注入：指定目标进程 PID
+    anti_detection: Option<bool> // 🔥 新增：反检测模式 (启用 --pause 等高级策略)
 ) -> Result<String, String> {
     // 0. 先停止之前的 Frida 进程（如果有）
     stop_frida_internal();
@@ -277,6 +300,10 @@ pub async fn run_frida_script(
         cmd.arg("-p").arg(pid.to_string()); // 使用 PID 注入
     } else if inject_mode == "spawn" {
         cmd.arg("-f").arg(&package_name); // Spawn 模式：重启 App
+        // 🔥 只有反检测模式才启用 --pause (确保 Hook 在 App 执行前加载)
+        if anti_detection.unwrap_or(false) {
+            cmd.arg("--pause");
+        }
     } else {
         cmd.arg("-n").arg(&package_name); // Attach 模式：附加到运行中的进程
     }

@@ -185,6 +185,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   const [fridaStatusMap, setFridaStatusMap] = useState<Record<string, boolean>>(
     {}
   );
+  const [useStealthMode, setUseStealthMode] = useState(false); // 🔥 Stealth Mode State
   const [moddedFridaStatusMap, setModdedFridaStatusMap] = useState<Record<string, boolean>>(
     {}
   ); // 🔥 魔改版 Frida 状态追踪
@@ -489,8 +490,12 @@ const Sidebar: React.FC<SidebarProps> = ({
         0
       );
       try {
-        const result = await invoke<string>("deploy_tool", {
+        // 🔥 Determine which deploy command to use
+        const deployCmd = (tool.id === "frida" && useStealthMode) ? "deploy_stealth_frida" : "deploy_tool";
+
+        const result = await invoke<string>(deployCmd, {
           deviceId: currentToolDevice.id,
+          // For stealth mode, we might not need toolId if it's a dedicated command but keeping it is fine
           toolId: tool.id,
           version: version,
           arch: arch,
@@ -512,17 +517,23 @@ const Sidebar: React.FC<SidebarProps> = ({
                       "-s",
                       currentToolDevice.id,
                       "shell",
-                      "su -c 'pkill -f frida-server'",
+                      "shell",
+                      "su -c 'pkill -f frida-server; pkill -f sys_svc_mgr'", // Kill both potential processes
                     ],
                   });
                 } catch (e) { }
+
+                // 🔥 Construct Start Command based on mode
+                const serverName = useStealthMode ? "sys_svc_mgr" : "frida-server";
+                const startCmd = `su -c 'setenforce 0; chmod 755 /data/local/tmp/${serverName}; nohup /data/local/tmp/${serverName} > /dev/null 2>&1 &'`;
+
                 await invoke("run_command", {
                   cmd: "adb",
                   args: [
                     "-s",
                     currentToolDevice.id,
                     "shell",
-                    "su -c 'setenforce 0; chmod 755 /data/local/tmp/frida-server; nohup /data/local/tmp/frida-server > /dev/null 2>&1 &'",
+                    startCmd,
                   ],
                 });
                 message.success(
@@ -1714,6 +1725,16 @@ const Sidebar: React.FC<SidebarProps> = ({
                               label: v,
                               value: v,
                             }))}
+                          />
+                        </Form.Item>
+                      )}
+                      {item.id === "frida" && (
+                        <Form.Item label="隐身模式" tooltip="重命名进程以绕过检测">
+                          <Switch
+                            checked={useStealthMode}
+                            onChange={setUseStealthMode}
+                            checkedChildren="开启"
+                            unCheckedChildren="关闭"
                           />
                         </Form.Item>
                       )}

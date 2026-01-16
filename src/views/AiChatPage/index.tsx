@@ -18,6 +18,7 @@ import {
   ClockCircleOutlined,
   BulbOutlined,
   SettingOutlined,
+  BugOutlined, // 🔥 Import for Stealth Mode
 } from "@ant-design/icons";
 import {
   Input,
@@ -295,6 +296,7 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
 
   // 状态管理
   const [isTaskPanelOpen, setIsTaskPanelOpen] = useState(false);
+  const [useStealthMode, setUseStealthMode] = useState(false); // 🔥 Chat Page Stealth Mode State
   const [activeApkName, setActiveApkName] = useState("");
   // const [logs, setLogs] = useState<LogEntry[]>([]); // ❌ 移除本地状态
   const [logFilter, setLogFilter] = useState<"all" | "key">("all");
@@ -889,12 +891,18 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
     const currentInput = chatInput;
     setChatInput("");
 
+    // 🔥 Augment Input with Stealth Mode Context
+    let finalInput = currentInput;
+    if (useStealthMode) {
+      finalInput += "\n\n(IMPORTANT: ACTIVE STEALTH MODE / ANTI-DETECTION. The user has reported detection issues. Please use `deploy_stealth_frida` or `getAntiBypass` strategies by default.)";
+    }
+
     if (pendingFile) {
       const file = pendingFile;
       const projectPath = pendingProjectPath; // 🔥 获取已选项目路径（如有）
       setPendingFile(null);
       setPendingProjectPath(null); // 🔥 清除项目路径
-      setTimeout(() => startPipeline(file, currentInput, projectPath || undefined), 100);
+      setTimeout(() => startPipeline(file, finalInput, projectPath || undefined), 100);
     } else {
       if (!activeApkName) {
         message.warning("请先上传一个 APK 文件再开始对话");
@@ -916,9 +924,10 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
 
       try {
         // 🔥 传递 ModelConfig
+        // 🔥 传递 ModelConfig
         await invoke("send_chat_message", {
           sessionId: sessionId,
-          message: currentInput,
+          message: finalInput,
           modelConfig: modelConfig, // Pass config
         });
       } catch (e) {
@@ -1168,6 +1177,28 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
                 }
                 disabled={isRunning}
               />
+
+              {/* 🔥 Stealth Mode Toggle Bubble */}
+              <Tooltip title={useStealthMode ? "已开启隐身模式 (对抗检测)" : "开启隐身模式"}>
+                <Button
+                  type="text"
+                  shape="circle"
+                  icon={<BugOutlined style={{ color: useStealthMode ? '#52c41a' : '#ccc', fontSize: 16 }} />}
+                  onClick={() => {
+                    const newState = !useStealthMode;
+                    setUseStealthMode(newState);
+                    if (newState) {
+                      message.success("隐身模式已开启: 所有指令将自动附加反检测提示");
+                    } else {
+                      message.info("隐身模式已关闭");
+                    }
+                  }}
+                  style={{
+                    marginBottom: 4,
+                    background: useStealthMode ? 'rgba(82, 196, 26, 0.1)' : 'transparent'
+                  }}
+                />
+              </Tooltip>
 
               {/* 动态切换 发送/停止 按钮 */}
               {isRunning ? (
@@ -1516,51 +1547,51 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
         </div>
       </div>
 
-       {/* 🔥 新增：项目选择模态框 */ }
-  <Modal
-    title="📂 选择已有项目"
-    open={isProjectModalOpen}
-    onCancel={() => setIsProjectModalOpen(false)}
-    footer={null}
-    width={600}
-  >
-    <List
-      dataSource={recentProjects}
-      locale={{ emptyText: '暂无历史项目' }}
-      renderItem={(project) => (
-        <List.Item
-          style={{ cursor: 'pointer', padding: '12px 16px', borderRadius: 8 }}
-          onClick={() => {
-            setIsProjectModalOpen(false);
-            // 🔥 修复：只设置待处理状态，等用户点击发送再启动
-            const virtualFile: AppFile = {
-              name: project.name,
-              path: project.apkPath || project.path,
-            };
-            setPendingFile(virtualFile);
-            setPendingProjectPath(project.path); // 记住项目路径，发送时传入
-            message.info(`已选择项目：${project.name}，请输入分析指令后发送`);
-          }}
-        >
+      {/* 🔥 新增：项目选择模态框 */}
+      <Modal
+        title="📂 选择已有项目"
+        open={isProjectModalOpen}
+        onCancel={() => setIsProjectModalOpen(false)}
+        footer={null}
+        width={600}
+      >
+        <List
+          dataSource={recentProjects}
+          locale={{ emptyText: '暂无历史项目' }}
+          renderItem={(project) => (
+            <List.Item
+              style={{ cursor: 'pointer', padding: '12px 16px', borderRadius: 8 }}
+              onClick={() => {
+                setIsProjectModalOpen(false);
+                // 🔥 修复：只设置待处理状态，等用户点击发送再启动
+                const virtualFile: AppFile = {
+                  name: project.name,
+                  path: project.apkPath || project.path,
+                };
+                setPendingFile(virtualFile);
+                setPendingProjectPath(project.path); // 记住项目路径，发送时传入
+                message.info(`已选择项目：${project.name}，请输入分析指令后发送`);
+              }}
+            >
 
-          <List.Item.Meta
-            avatar={<FileZipOutlined style={{ fontSize: 24, color: '#1890ff' }} />}
-            title={project.name}
-            description={
-              <div>
-                <div style={{ fontSize: 11, color: '#888' }}>
-                  📁 {project.path}
-                </div>
-                <div style={{ fontSize: 11, color: '#888' }}>
-                  🕐 {new Date(project.lastUsed).toLocaleString()}
-                </div>
-              </div>
-            }
-          />
-        </List.Item>
-      )}
-    />
-  </Modal>
+              <List.Item.Meta
+                avatar={<FileZipOutlined style={{ fontSize: 24, color: '#1890ff' }} />}
+                title={project.name}
+                description={
+                  <div>
+                    <div style={{ fontSize: 11, color: '#888' }}>
+                      📁 {project.path}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#888' }}>
+                      🕐 {new Date(project.lastUsed).toLocaleString()}
+                    </div>
+                  </div>
+                }
+              />
+            </List.Item>
+          )}
+        />
+      </Modal>
     </div>
   );
 };
