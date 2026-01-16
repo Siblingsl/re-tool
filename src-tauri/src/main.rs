@@ -122,7 +122,8 @@ fn main() {
             // --- Agent (Cloud) ---
             agent::notify_cloud_job_start,
             agent::connect_agent,
-            agent::send_chat_message
+            agent::send_chat_message,
+            agent::upload_traffic
             
         ])
         .build(tauri::generate_context!())

@@ -638,6 +638,18 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
             };
 
             db.networkCaptures.put(newReq).catch(console.error);
+
+            // 🔥 新增：实时同步给 Agent Server
+            // 只有当有活跃会话时才发送
+            if (currentSessionRef.current) {
+              invoke("upload_traffic", {
+                sessionId: currentSessionRef.current,
+                traffic: newReq
+              }).catch(err => {
+                // 忽略静默失败，避免刷屏
+                // console.warn("Failed to upload traffic:", err);
+              });
+            }
           } catch (e) {
             console.error("Failed to parse mitm-traffic:", e);
           }
@@ -785,6 +797,19 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
         listen("agent-connected-success", () => {
           clearTimeout(timeout);
           addLog("Agent", "✅ 云端连接成功！", "success");
+
+          // 🔥 自动启动抓包服务
+          invoke("start_mitmproxy", { port: 10086 })
+            .then(() => {
+              addLog("Local", "🔄 自动启动抓包服务", "info");
+              setIsMitmRunning(true);
+            })
+            .catch(e => {
+              if (String(e).includes("already") || String(e).includes("占用")) {
+                setIsMitmRunning(true);
+              }
+            });
+
           resolve();
         });
         invoke("connect_agent", { sessionId }).catch(reject);

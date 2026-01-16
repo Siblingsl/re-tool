@@ -262,6 +262,29 @@ pub async fn send_chat_message(
     } else {
         Err(format!("Cloud Error: {}", res.status()))
     }
+
+}
+
+// 🔥 新增：上传抓包数据
+#[tauri::command]
+pub async fn upload_traffic(
+    session_id: String,
+    traffic: Value
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({ 
+        "sessionId": session_id, 
+        "traffic": traffic
+    });
+
+    // 异步发送，不等待详细结果，只关心成功失败
+    let _ = client.post(format!("{}/api/agent/traffic", CLOUD_URL))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok("Uploaded".to_string())
 }
 
 async fn dispatch_command(app: &AppHandle, action: &str, params: Value) -> Result<Value, String> {
