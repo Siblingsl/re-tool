@@ -1,4 +1,4 @@
-use std::process::{Stdio, Child};
+use std::process::{Stdio, Child, Command};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write, Cursor, Read};
 use std::time::Duration;
@@ -289,37 +289,50 @@ pub async fn run_frida_script(
         "-U".to_string()
     };
 
-    // 3. 🔥 根据 mode 和 target_pid 决定注入方式
+    // 3. 🔥 Use Python Loader for reliable execution (Spawn/Attach + Resume)
     let inject_mode = mode.unwrap_or_else(|| "spawn".to_string());
     
-    let mut cmd = create_command("frida");
-    cmd.arg(&device_arg);
+    // 🔥 HARDCODED for development - TODO: use proper resource bundling for release
+    let loader_script = std::path::PathBuf::from(
+        "C:/Users/User/Desktop/code/re-tool/src-tauri/bin/frida_loader.py"
+    );
     
-    // 🔥 多进程支持：如果指定了 PID，直接使用 -p 参数
-    if let Some(pid) = target_pid {
-        cmd.arg("-p").arg(pid.to_string()); // 使用 PID 注入
-    } else if inject_mode == "spawn" {
-        cmd.arg("-f").arg(&package_name); // Spawn 模式：重启 App
-        // 🔥 只有反检测模式才启用 --pause (确保 Hook 在 App 执行前加载)
-        if anti_detection.unwrap_or(false) {
-            cmd.arg("--pause");
-        }
-    } else {
-        cmd.arg("-n").arg(&package_name); // Attach 模式：附加到运行中的进程
+    if !loader_script.exists() {
+        return Err(format!("Python Loader not found at: {:?}", loader_script));
     }
-
     
-    cmd.arg("-l").arg(&script_path);
+    println!("[Frida] 🐍 Using Python Loader: {:?}", loader_script);
+
+    let mut cmd = Command::new("python");
+    
+    // Args: <device_id> <package> <script_path> <mode> <anti_detect_bool>
+    let dev_id_arg = if device_id.is_empty() { "null".to_string() } else { device_id.clone() };
+    
+    // Prepare args for python script
+    cmd.arg(&loader_script)
+       .arg(&dev_id_arg)
+       .arg(&package_name)
+       .arg(&script_path)
+       .arg(&inject_mode)
+       .arg(if anti_detection.unwrap_or(false) { "true" } else { "false" });
+       
+    println!("[Frida] 🚀 Executing: python {} {} {} {} {} {}", 
+        loader_script.display(), dev_id_arg, package_name, script_path.display(), inject_mode, anti_detection.unwrap_or(false));
+
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    // No stdin needed for python loader control, but we keep it to avoid breakage if we write to it later (though we won't)
+    cmd.stdin(Stdio::piped());
 
     // 4. 启动子进程
     let mut child = cmd.spawn()
-        .map_err(|e| format!("Frida 启动失败 (请确保已安装 frida-tools): {}", e))?;
+        .map_err(|e| format!("Python Scripts 启动失败 (请确保安装了 python 和 frida): {}", e))?;
 
     // 5. 获取管道句柄
     let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
     let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
+    
+    // (Auto-Resume logic removed, handled by Python script)
 
     // 6. 🔥 保存进程句柄到全局状态
     {
@@ -340,6 +353,9 @@ pub async fn run_frida_script(
         
         for line in reader.lines() {
             if let Ok(l) = line {
+                // 🔥 Print to local console for debugging
+                println!("[Frida STDOUT] {}", l);
+
                 // 发送给前端 UI
                 let _ = app_out.emit("frida-log", l.clone());
                 
@@ -350,7 +366,7 @@ pub async fn run_frida_script(
                 
                 // 🔥 同步到云端
                 if let Some(ref sid) = session_for_out {
-                    let _ = sync_log_to_cloud(&client, sid, &l);
+                     let _ = sync_log_to_cloud(&client, sid, &l);
                 }
             }
         }
@@ -368,6 +384,9 @@ pub async fn run_frida_script(
         for line in reader.lines() {
             if let Ok(l) = line {
                 let msg = format!("[ERROR] {}", l);
+                // 🔥 Print to local console
+                println!("[Frida STDERR] {}", l);
+
                 let _ = app_err.emit("frida-log", msg.clone());
                 
                 // 同步错误日志到云端

@@ -73,7 +73,7 @@ pub async fn start_mitmproxy(
                     let log = String::from_utf8_lossy(&line).to_string();
                     // 过滤掉那些没用的 Info 日志，只看关键的
                     if log.contains("Loading script") || log.contains("listening") || log.contains("{") {
-                         println!("[Mitm]: {}", log); 
+                        //  println!("[Mitm]: {}", log); 
                     }
                     let _ = app.emit("mitm-traffic", log);
                 }
@@ -88,6 +88,7 @@ pub async fn start_mitmproxy(
 
     Ok(format!("代理已启动 (端口: {})", port))
 }
+
 
 #[tauri::command]
 pub async fn stop_mitmproxy(state: State<'_, MitmState>) -> Result<String, String> {
