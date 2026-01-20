@@ -490,6 +490,47 @@ async fn dispatch_command(app: &AppHandle, action: &str, params: Value) -> Resul
             
             Ok(json!({ "outputDir": result, "message": "Decompilation successful" }))
         }
+        // 🔥 [新增] 获取设备信息 (root/SELinux/ABI)
+        "GET_DEVICE_INFO" => {
+            println!("[Agent] 📱 Getting device info...");
+            
+            // 获取第一个连接的设备
+            let devices = commands::device::get_all_devices().await?;
+            if devices.is_empty() {
+                return Err("No device connected".to_string());
+            }
+            let device_id = &devices[0].id;
+            
+            // 并行获取设备信息
+            let is_rooted = commands::device::check_is_rooted(device_id.clone()).await.unwrap_or(false);
+            let abi = commands::device::get_device_abi(device_id.clone()).await.unwrap_or("unknown".to_string());
+            
+            // 获取 SELinux 状态
+            let selinux_output = crate::utils::create_command("adb")
+                .args(&["-s", device_id, "shell", "getenforce"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or("unknown".to_string());
+            
+            // 获取 Android 版本
+            let android_version = crate::utils::cmd_exec("adb", &["-s", device_id, "shell", "getprop", "ro.build.version.release"])
+                .unwrap_or("unknown".to_string()).trim().to_string();
+            
+            // 获取设备型号
+            let device_model = crate::utils::cmd_exec("adb", &["-s", device_id, "shell", "getprop", "ro.product.model"])
+                .unwrap_or("unknown".to_string()).trim().to_string();
+            
+            println!("[Agent] 📱 Device: {} ({}) | Root: {} | SELinux: {}", 
+                device_model, abi, is_rooted, selinux_output);
+            
+            Ok(json!({
+                "isRooted": is_rooted,
+                "selinux": selinux_output,
+                "abi": abi,
+                "androidVersion": android_version,
+                "deviceModel": device_model
+            }))
+        }
         _ => Err(format!("Unknown action: {}", action)),
     }
 }
