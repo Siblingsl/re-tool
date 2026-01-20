@@ -181,7 +181,7 @@ fn start_socket_client(app_handle: AppHandle, session_id: String) {
             let handle = cmd_handle.clone();
             let socket_clone = socket.clone();
 
-            println!("[Agent] 📦 Payload Received: {:?}", payload);
+            // println!("[Agent] 📦 Payload Received: {:?}", payload);
 
             let data_str = match payload {
                 Payload::String(s) => s,
@@ -502,7 +502,9 @@ pub async fn notify_cloud_job_start(
     model_config: Option<ModelConfig>,
     manifest: Option<String>,
     file_tree: Option<Vec<FileNode>>,
-    network_captures: Option<Vec<serde_json::Value>>  // 🔥 新增：网络抓包数据
+    network_captures: Option<Vec<serde_json::Value>>,
+    frida_mode: Option<String>,
+    use_stealth_mode: Option<bool> // 🔥 新增：隐身模式
 ) -> Result<String, String> {
     println!("[Agent] 🚀 Notifying Cloud. Instruction: {}", instruction);
 
@@ -549,7 +551,9 @@ pub async fn notify_cloud_job_start(
             "manifestXml": manifest.unwrap_or_default(),
             "fileTree": refined_list
         },
-        "networkCaptures": network_captures.unwrap_or_default() // 🔥 新增：发送网络抓包数据
+        "networkCaptures": network_captures.unwrap_or_default(),
+        "fridaMode": frida_mode.unwrap_or_else(|| "spawn".to_string()),
+        "useStealthMode": use_stealth_mode.unwrap_or(false) // 🔥 新增：隐身模式
     });
 
     let res = client.post(format!("{}/api/client-ready", CLOUD_URL))

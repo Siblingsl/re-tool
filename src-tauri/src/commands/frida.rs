@@ -289,50 +289,49 @@ pub async fn run_frida_script(
         "-U".to_string()
     };
 
-    // 3. 🔥 Use Python Loader for reliable execution (Spawn/Attach + Resume)
+    // 3. 🔥 直接使用 Frida CLI (替换 Python Loader)
     let inject_mode = mode.unwrap_or_else(|| "spawn".to_string());
     
-    // 🔥 HARDCODED for development - TODO: use proper resource bundling for release
-    let loader_script = std::path::PathBuf::from(
-        "C:/Users/User/Desktop/code/re-tool/src-tauri/bin/frida_loader.py"
-    );
+    println!("[Frida] 🚀 Using Frida CLI (Mode: {})", inject_mode);
+
+    let mut cmd = Command::new("frida");
     
-    if !loader_script.exists() {
-        return Err(format!("Python Loader not found at: {:?}", loader_script));
+    // 设备参数
+    cmd.arg(&device_arg);
+    
+    // 模式选择: spawn (-f) 或 attach (-n) - 必须在 -l 之前
+    if inject_mode == "spawn" {
+        cmd.arg("-f").arg(&package_name);
+    } else {
+        cmd.arg("-n").arg(&package_name);
     }
     
-    println!("[Frida] 🐍 Using Python Loader: {:?}", loader_script);
-
-    let mut cmd = Command::new("python");
+    // 脚本参数 (-l) 放在后面
+    cmd.arg("-l").arg(&script_path);
     
-    // Args: <device_id> <package> <script_path> <mode> <anti_detect_bool>
-    let dev_id_arg = if device_id.is_empty() { "null".to_string() } else { device_id.clone() };
-    
-    // Prepare args for python script
-    cmd.arg(&loader_script)
-       .arg(&dev_id_arg)
-       .arg(&package_name)
-       .arg(&script_path)
-       .arg(&inject_mode)
-       .arg(if anti_detection.unwrap_or(false) { "true" } else { "false" });
+    // 反检测模式 (可选参数)
+    if anti_detection.unwrap_or(false) {
+        // Frida 16+ 支持 --realm=emulated 等选项
+        // 这里暂不添加额外参数，可根据需要扩展
+    }
        
-    println!("[Frida] 🚀 Executing: python {} {} {} {} {} {}", 
-        loader_script.display(), dev_id_arg, package_name, script_path.display(), inject_mode, anti_detection.unwrap_or(false));
+    println!("[Frida] 🚀 Executing: frida {} -l {:?} {} {}", 
+        device_arg, script_path, 
+        if inject_mode == "spawn" { format!("-f {} --no-pause", package_name) } else { format!("-n {}", package_name) },
+        if anti_detection.unwrap_or(false) { "(anti-detect)" } else { "" }
+    );
 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    // No stdin needed for python loader control, but we keep it to avoid breakage if we write to it later (though we won't)
-    cmd.stdin(Stdio::piped());
+    cmd.stdin(Stdio::null()); // frida CLI 不需要 stdin
 
     // 4. 启动子进程
     let mut child = cmd.spawn()
-        .map_err(|e| format!("Python Scripts 启动失败 (请确保安装了 python 和 frida): {}", e))?;
+        .map_err(|e| format!("Frida CLI 启动失败 (请确保已安装 frida-tools): {}", e))?;
 
     // 5. 获取管道句柄
     let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
     let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
-    
-    // (Auto-Resume logic removed, handled by Python script)
 
     // 6. 🔥 保存进程句柄到全局状态
     {

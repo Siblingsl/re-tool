@@ -59,6 +59,7 @@ fn main() {
             app::launch_app,
             app::stop_app,
             app::get_foreground_app,
+            app::get_running_apps, // 🔥 新增
             app::extract_apk,
 
             // --- File (Remote) ---

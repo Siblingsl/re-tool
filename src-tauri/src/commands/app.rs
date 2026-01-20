@@ -26,6 +26,31 @@ pub async fn get_device_apps(device_id: String, device_type: String) -> Result<V
     Ok(apps)
 }
 
+// 🔥 新增：获取运行中的应用列表
+#[tauri::command]
+pub async fn get_running_apps(device_id: String) -> Result<Vec<String>, String> {
+    // 使用 ps -A 过滤 u0_a 开头的进程
+    let output = cmd_exec("adb", &["-s", &device_id, "shell", "ps", "-A", "-o", "USER,NAME"])?;
+    let mut running_pkgs = Vec::new();
+    
+    for line in output.lines().skip(1) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let user = parts[0];
+            let pkg = parts[parts.len()-1]; // 最后一部分通常是包名
+            
+            // 简单 heuristic: 包含点，且不是系统应用(简单判断)
+            // 真实场景: 用户应用通常是 u0_aXXX
+            if (user.starts_with("u0_a") || pkg.contains('.')) && !pkg.starts_with('[') && !pkg.contains('/') {
+                 if !running_pkgs.contains(&pkg.to_string()) {
+                     running_pkgs.push(pkg.to_string());
+                 }
+            }
+        }
+    }
+    Ok(running_pkgs)
+}
+
 #[tauri::command]
 pub async fn install_apk(device_id: String, apk_path: String) -> Result<String, String> {
     let output = cmd_exec("adb", &["-s", &device_id, "install", "-r", &apk_path])?;

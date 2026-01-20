@@ -63,6 +63,16 @@ export const getDeviceApps = async (
   }
 };
 
+// 3. 获取运行中的应用列表 (仅 Android)
+export const getRunningApps = async (deviceId: string): Promise<string[]> => {
+  try {
+    return await invoke<string[]>("get_running_apps", { deviceId });
+  } catch (error) {
+    console.error(`Failed to fetch running apps for ${deviceId}:`, error);
+    return [];
+  }
+};
+
 const getRandomColor = () => {
   const colors = [
     "#f56a00",

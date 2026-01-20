@@ -297,6 +297,7 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
   // 状态管理
   const [isTaskPanelOpen, setIsTaskPanelOpen] = useState(false);
   const [useStealthMode, setUseStealthMode] = useState(false); // 🔥 Chat Page Stealth Mode State
+  const [fridaMode, setFridaMode] = useState<"spawn" | "attach">("spawn"); // 🔥 Frida 执行模式
   const [activeApkName, setActiveApkName] = useState("");
   // const [logs, setLogs] = useState<LogEntry[]>([]); // ❌ 移除本地状态
   const [logFilter, setLogFilter] = useState<"all" | "key">("all");
@@ -868,7 +869,7 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
       // 4. 通知云端开始任务
       addLog("Local", `发送指令: ${userInstruction || "默认分析"}`, "info");
 
-      // 🔥 传递 ModelConfig + Context + NetworkCaptures
+      // 🔥 传递 ModelConfig + Context + NetworkCaptures + FridaMode
       await invoke("notify_cloud_job_start", {
         sessionId: sessionId,
         filePath: outputDir,
@@ -876,7 +877,9 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
         modelConfig: modelConfig,
         manifest: manifestContent, // 🔥 Handshake Payload
         fileTree: fileTree,        // 🔥 Handshake Payload
-        networkCaptures: httpRequests // 🔥 新增：发送网络抓包数据给 AI 分析
+        networkCaptures: httpRequests, // 🔥 发送网络抓包数据
+        fridaMode: fridaMode,       // 🔥 新增：Frida 执行模式 (spawn/attach)
+        useStealthMode: useStealthMode // 🔥 新增：隐身模式
       });
     } catch (e) {
       if (unlistenJadx) unlistenJadx();
@@ -1223,6 +1226,31 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
                     background: useStealthMode ? 'rgba(82, 196, 26, 0.1)' : 'transparent'
                   }}
                 />
+              </Tooltip>
+
+              {/* 🔥 Frida Mode Toggle (spawn/attach) */}
+              <Tooltip title={fridaMode === "spawn" ? "Spawn 模式 (启动 APP)" : "Attach 模式 (附加运行中的 APP)"}>
+                <Button
+                  type="text"
+                  size="small"
+                  onClick={() => {
+                    const newMode = fridaMode === "spawn" ? "attach" : "spawn";
+                    setFridaMode(newMode);
+                    message.info(`Frida 模式切换为: ${newMode === "spawn" ? "Spawn (启动)" : "Attach (附加)"}`);
+                  }}
+                  style={{
+                    marginBottom: 4,
+                    fontSize: 10,
+                    padding: "2px 6px",
+                    height: 24,
+                    borderRadius: 12,
+                    background: fridaMode === "spawn" ? "rgba(24, 144, 255, 0.1)" : "rgba(250, 173, 20, 0.1)",
+                    color: fridaMode === "spawn" ? "#1890ff" : "#faad14",
+                    border: `1px solid ${fridaMode === "spawn" ? "#1890ff" : "#faad14"}`,
+                  }}
+                >
+                  {fridaMode === "spawn" ? "Spawn" : "Attach"}
+                </Button>
               </Tooltip>
 
               {/* 动态切换 发送/停止 按钮 */}
