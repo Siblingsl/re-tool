@@ -531,6 +531,190 @@ async fn dispatch_command(app: &AppHandle, action: &str, params: Value) -> Resul
                 "deviceModel": device_model
             }))
         }
+        // 🔥 [新增] Frida 可用性评估
+        "GET_FRIDA_STATUS" => {
+            println!("[Agent] 🔍 Checking Frida availability...");
+            
+            // 获取第一个连接的设备
+            let devices = commands::device::get_all_devices().await?;
+            if devices.is_empty() {
+                return Err("No device connected".to_string());
+            }
+            let device_id = &devices[0].id;
+            
+            // 1. 检测本地 frida 客户端版本
+            let local_frida_version = crate::utils::create_command("frida")
+                .arg("--version")
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or("not_installed".to_string());
+            
+            // 2. 检测设备上的 frida-server 进程
+            let ps_output = crate::utils::cmd_exec("adb", &["-s", device_id, "shell", "ps -A 2>/dev/null || ps"])
+                .unwrap_or_default();
+            let frida_server_running = ps_output.contains("frida-server") || ps_output.contains("frida");
+            
+            // 3. 获取 frida-server 版本 (通过连接测试)
+            let server_version = if frida_server_running {
+                // 尝试通过 frida-ps 获取版本信息
+                crate::utils::create_command("frida-ps")
+                    .args(&["-D", device_id])
+                    .output()
+                    .map(|o| {
+                        if o.status.success() {
+                            // frida-ps 成功意味着版本兼容
+                            local_frida_version.clone()
+                        } else {
+                            "version_mismatch".to_string()
+                        }
+                    })
+                    .unwrap_or("unknown".to_string())
+            } else {
+                "not_running".to_string()
+            };
+            
+            // 4. 检测 frida-server 监听端口 (默认 27042)
+            let port_check = crate::utils::cmd_exec("adb", &["-s", device_id, "shell", "netstat -tlnp 2>/dev/null | grep 27042 || ss -tlnp 2>/dev/null | grep 27042"])
+                .unwrap_or_default();
+            let port_listening = port_check.contains("27042") || frida_server_running;
+            
+            // 5. 版本匹配检查
+            let version_match = if local_frida_version != "not_installed" && server_version != "not_running" && server_version != "version_mismatch" {
+                true
+            } else {
+                false
+            };
+            
+            println!("[Agent] 🔍 Frida: local={} | server_running={} | port={} | match={}", 
+                local_frida_version, frida_server_running, port_listening, version_match);
+            
+            Ok(json!({
+                "localVersion": local_frida_version,
+                "serverRunning": frida_server_running,
+                "serverVersion": server_version,
+                "portListening": port_listening,
+                "versionMatch": version_match
+            }))
+        }
+        
+        // 🔥 Capstone 反汇编 SO 文件
+        "DISASM_SO" => {
+            let so_path = params["soPath"].as_str().ok_or("Missing soPath")?;
+            let function_name = params["functionName"].as_str();
+            let max_instructions = params["maxInstructions"].as_u64().unwrap_or(100) as usize;
+            
+            println!("[Agent] 🔧 Disassembling SO: {} (func: {:?})", so_path, function_name);
+            
+            // 读取 SO 文件
+            let so_data = fs::read(so_path).map_err(|e| format!("Failed to read SO: {}", e))?;
+            
+            // 解析 ELF
+            let elf = Elf::parse(&so_data).map_err(|e| format!("Failed to parse ELF: {}", e))?;
+            
+            // 确定架构
+            let (arch, mode) = match elf.header.e_machine {
+                goblin::elf::header::EM_AARCH64 => (capstone::Arch::ARM64, capstone::Mode::Arm),
+                goblin::elf::header::EM_ARM => (capstone::Arch::ARM, capstone::Mode::Arm),
+                goblin::elf::header::EM_X86_64 => (capstone::Arch::X86, capstone::Mode::Mode64),
+                goblin::elf::header::EM_386 => (capstone::Arch::X86, capstone::Mode::Mode32),
+                m => return Err(format!("Unsupported architecture: {}", m)),
+            };
+            
+            println!("[Agent] 📐 Detected arch: {:?}", arch);
+            
+            // 创建 Capstone 引擎
+            let cs = Capstone::new()
+                .set_arch(arch)
+                .mode(mode)
+                .detail(true)
+                .build()
+                .map_err(|e| format!("Failed to create Capstone: {:?}", e))?;
+            
+            let mut results: Vec<serde_json::Value> = Vec::new();
+            
+            // 查找目标符号
+            let target_symbols: Vec<_> = elf.syms.iter()
+                .filter(|sym| {
+                    if let Some(name) = elf.strtab.get_at(sym.st_name) {
+                        if let Some(target_name) = function_name {
+                            name.contains(target_name)
+                        } else {
+                            // 如果没有指定函数名，查找可疑函数
+                            let suspicious = ["encrypt", "decrypt", "sign", "verify", "hash", 
+                                            "aes", "des", "rsa", "md5", "sha", "key", "cipher"];
+                            suspicious.iter().any(|k| name.to_lowercase().contains(k))
+                        }
+                    } else {
+                        false
+                    }
+                })
+                .collect();
+            
+            println!("[Agent] 🎯 Found {} target symbols", target_symbols.len());
+            
+            for sym in target_symbols.iter().take(10) {
+                if sym.st_value == 0 || sym.st_size == 0 {
+                    continue;
+                }
+                
+                let sym_name = elf.strtab.get_at(sym.st_name).unwrap_or("unknown");
+                let sym_offset = sym.st_value as usize;
+                let sym_size = std::cmp::min(sym.st_size as usize, 1024); // 限制大小
+                
+                // 找到对应的段
+                let section_offset = elf.section_headers.iter()
+                    .find(|s| sym_offset >= s.sh_addr as usize && 
+                              sym_offset < (s.sh_addr + s.sh_size) as usize)
+                    .map(|s| s.sh_offset as usize + (sym_offset - s.sh_addr as usize));
+                
+                if let Some(file_offset) = section_offset {
+                    if file_offset + sym_size <= so_data.len() {
+                        let code = &so_data[file_offset..file_offset + sym_size];
+                        
+                        match cs.disasm_count(code, sym_offset as u64, max_instructions) {
+                            Ok(insns) => {
+                                let disasm: Vec<serde_json::Value> = insns.iter()
+                                    .map(|i| json!({
+                                        "address": format!("0x{:x}", i.address()),
+                                        "mnemonic": i.mnemonic().unwrap_or(""),
+                                        "operands": i.op_str().unwrap_or("")
+                                    }))
+                                    .collect();
+                                
+                                results.push(json!({
+                                    "symbol": sym_name,
+                                    "address": format!("0x{:x}", sym_offset),
+                                    "size": sym_size,
+                                    "instructions": disasm.len(),
+                                    "disassembly": disasm
+                                }));
+                                
+                                println!("[Agent] ✅ Disassembled {}: {} instructions", sym_name, disasm.len());
+                            }
+                            Err(e) => {
+                                println!("[Agent] ⚠️ Failed to disasm {}: {:?}", sym_name, e);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // 获取导出函数列表
+            let exports: Vec<String> = elf.dynsyms.iter()
+                .filter(|sym| sym.st_value != 0 && sym.is_function())
+                .filter_map(|sym| elf.dynstrtab.get_at(sym.st_name).map(|s| s.to_string()))
+                .take(50)
+                .collect();
+            
+            Ok(json!({
+                "success": true,
+                "arch": format!("{:?}", arch),
+                "totalSymbols": elf.syms.len(),
+                "exportedFunctions": exports,
+                "disassembledFunctions": results
+            }))
+        }
+        
         _ => Err(format!("Unknown action: {}", action)),
     }
 }
