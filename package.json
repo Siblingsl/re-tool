@@ -16,6 +16,7 @@
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "~2.4.2",
     "@tauri-apps/plugin-opener": "^2",
+    "@xyflow/react": "^12.10.0",
     "@yume-chan/adb": "^2.3.1",
     "@yume-chan/adb-scrcpy": "^2.3.0",
     "@yume-chan/scrcpy": "^2.3.0",

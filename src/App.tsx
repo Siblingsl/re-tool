@@ -17,8 +17,13 @@ import FileExplorer from "./views/FileExplorer";
 import ApkBuilder from "./views/ApkBuilder";
 import JavaAnalyzer from "./views/JavaAnalyzer";
 import NetworkSniffer from "./views/NetworkSniffer";
-import WebLab from "./views/WebLab";
+import WebLab from "./views/JsRe/WebLab";
 import AiWorkbenchPage from "./views/AiChatPage"; // 确保引用的是工作台组件
+import BrowserHome from "./views/JsRe/BrowserHome";
+import AstLab from "./views/JsRe/AstLab";
+import { BrowserInstance } from "./components/Sidebar";
+import AiCaptcha from "./views/JsRe/Captcha";
+import ScriptWorkshop from "./views/JsRe/ScriptWorkshop";
 
 // 定义脚本接口
 export interface ScriptItem {
@@ -195,6 +200,94 @@ const App: React.FC = () => {
   const [loadingDevices, setLoadingDevices] = useState(false);
   const [converterContext, setConverterContext] = useState("");
 
+  // ✅ 浏览器多实例状态提升到了 App 层
+  const [browserInstances, setBrowserInstances] = useState<BrowserInstance[]>([
+    {
+      id: "default-1",
+      name: "浏览器 1",
+      type: "chrome",
+      status: "stopped",
+      url: "https://www.baidu.com", // 默认外部网址
+      fingerprint: {
+        userAgent:
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        canvasNoise: true,
+        webglNoise: true,
+        timezone: "Asia/Shanghai",
+        locale: "zh-CN",
+      },
+    },
+  ]);
+
+  // 管理当前“选中/激活”的浏览器实例 ID（主要用于右侧显示）
+  // 逻辑：如果 Sidebar 选中了某个实例（在 JS 模式下），我们需要知道它是谁。
+  // 但目前 Sidebar 的 selection 逻辑比较复杂（可能选中了 'browser' view 但没有具体的 ID）。
+  // 这里我们简化：Sidebar 点击实例 -> onViewChange('browser') -> 同时我们需要一个 way to know active ID.
+  // 暂时我们也把 selectedBrowserId 提升上来，或者简单点，App 不存 selectedId，只存 List。
+  // Sidebar 的逻辑是：Visual selection 还是在 Sidebar 内部？
+  // 不，要联动的话，App 最好知道 activeId。
+  // 这里暂不强求 Sidebar 传 activeId 回来（改动大），我们假设：JS模式下，BrowserWorkspace 显示列表的第一个 Running 实例，或者提供切换？
+  // 修正方案：BrowserWorkspace 接收 activeId。我们需要在 Sidebar 点击实例时，不仅 onViewChange，还要 notify App。
+  // 既然 Sidebar 已经是受控组件（ViewMode 受控），我们再加一个 activeBrowserId 状态。
+  const [activeBrowserId, setActiveBrowserId] = useState<string>("default-1");
+
+  // ✅ CRUD 操作
+  const handleAddBrowserInstance = () => {
+    const newId = Date.now().toString();
+    setBrowserInstances([
+      ...browserInstances,
+      {
+        id: newId,
+        name: `浏览器 ${browserInstances.length + 1}`,
+        type: "chrome",
+        status: "stopped",
+        url: "https://www.baidu.com",
+        fingerprint: {
+          userAgent:
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          canvasNoise: true,
+          webglNoise: true,
+          timezone: "Asia/Shanghai",
+          locale: "zh-CN",
+        },
+      },
+    ]);
+    setActiveBrowserId(newId); // 自动选中新建的
+  };
+
+  const handleRemoveBrowserInstance = (id: string) => {
+    const newList = browserInstances.filter((i) => i.id !== id);
+    setBrowserInstances(newList);
+    if (activeBrowserId === id && newList.length > 0) {
+      setActiveBrowserId(newList[0].id);
+    }
+  };
+
+  const handleUpdateBrowserInstance = (
+    id: string,
+    updates: Partial<BrowserInstance>
+  ) => {
+    setBrowserInstances(
+      browserInstances.map((i) => (i.id === id ? { ...i, ...updates } : i))
+    );
+    // 如果是点击操作导致的状态更新，我们也顺便激活它
+    // 但这里 update 可能是后台或者输入框，不强制切换 activeId
+    if (id !== activeBrowserId) {
+      // Optional: auto switch? 还是留给 Sidebar 点击事件?
+      // 暂时保留，Sidebar 点击 Item 会触发什么？ Sidebar 内部逻辑要看下。
+      // Sidebar 之前的逻辑是 onClick 触发 update(status) 或者 input change。
+      // Sidebar 选中某行（高亮）的逻辑是：nav-item-split active。
+      // 我们最好确保 Sidebar 点击 Item Body 时，设置 activeBrowserId。
+    }
+  }
+
+  // 辅助：当 Sidebar 仅仅是 update 且没有显式切换 View 时，我们怎么知道 activeId？
+  // 暂时先用 update 实现。
+  const handleSidebarUpdateBrowser = (id: string, updates: Partial<BrowserInstance>) => {
+    handleUpdateBrowserInstance(id, updates);
+    setActiveBrowserId(id); // 只要操作了某个实例，就视为激活它
+  };
+
   const [scripts, setScripts] = useState<ScriptItem[]>(() => {
     const saved = localStorage.getItem("my_scripts");
     return saved ? JSON.parse(saved) : DEFAULT_SCRIPTS;
@@ -271,6 +364,18 @@ const App: React.FC = () => {
     }
     : undefined;
 
+  // ✅ 管理浏览器快捷操作请求
+  const [browserActionRequest, setBrowserActionRequest] = useState<{ instanceId: string, action: "cdp" | "network" | "hooks" } | null>(null);
+
+  const handleOpenInstanceAction = (id: string, action: "cdp" | "network" | "hooks") => {
+    // 1. 确保切换到 Browser 视图
+    setCurrentView("browser");
+    // 2. 激活该实例
+    setActiveBrowserId(id);
+    // 3. 设置 Action 请求，传递给 BrowserHome 处理
+    setBrowserActionRequest({ instanceId: id, action });
+  };
+
   return (
     <div className="layout-container">
       <Sidebar
@@ -282,6 +387,15 @@ const App: React.FC = () => {
         onRefresh={refreshDevices}
         deviceAliases={deviceAliases}
         onRenameDevice={handleRenameDevice}
+
+        // ✅ 传递浏览器状态
+        browserInstances={browserInstances}
+        onAddBrowserInstance={handleAddBrowserInstance}
+        onRemoveBrowserInstance={handleRemoveBrowserInstance}
+        onUpdateBrowserInstance={handleSidebarUpdateBrowser}
+        activeBrowserInstanceId={activeBrowserId}
+        onSelectBrowserInstance={setActiveBrowserId}
+        onOpenInstanceAction={handleOpenInstanceAction}
       />
 
       <div className="main-content">
@@ -349,6 +463,20 @@ const App: React.FC = () => {
           <CodeConverter initialCode={converterContext} />
         )}
         {currentView === "web-lab" && <WebLab />}
+        {/* ✅ 新增：浏览器工作台视图 */}
+        {currentView === "browser" && (
+          <BrowserHome
+            instances={browserInstances}
+            activeInstance={browserInstances.find(i => i.id === activeBrowserId)}
+            onUpdateInstance={handleUpdateBrowserInstance}
+            onActivateInstance={(id) => setActiveBrowserId(id)}
+            actionRequest={browserActionRequest}
+            onClearActionRequest={() => setBrowserActionRequest(null)}
+          />
+        )}
+        {currentView === "ast-lab" && <AstLab />}
+        {currentView === "ai-captcha" && <AiCaptcha />}
+        {currentView === "js-script-workshop" && <ScriptWorkshop />}
         {currentView === "asm-lab" && (
           <Empty description="ARM 汇编实验室" style={{ marginTop: 100 }} />
         )}

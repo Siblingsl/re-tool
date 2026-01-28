@@ -48,6 +48,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { NetworkRequest } from "@/types";
+import { agentService } from "../../services/agentService";
+
 
 const { TextArea } = Input;
 
@@ -786,9 +788,20 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
 
       // 3. 连接云端
       addLog("Local", "正在连接云端大脑...", "info");
-      unlistenConnect = await listen("agent-connected-success", () => {
+
+      let socketId: string | undefined;
+
+      unlistenConnect = await listen("agent-connected-success", (event: any) => {
+        // 尝试从事件中获取 socketId (如果后端支持)
+        if (event.payload && typeof event.payload === 'object' && event.payload.socketId) {
+          socketId = event.payload.socketId;
+          addLog("Local", `Socket ID: ${socketId}`, "info");
+        } else if (typeof event.payload === 'string' && event.payload.startsWith('sid_')) {
+          socketId = event.payload;
+        }
         // 事件触发时会调用 resolve
       });
+
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
           reject("连接云端超时 (15s)，请检查网络");
@@ -866,21 +879,32 @@ const AiWorkbenchPage: React.FC<{ sessionId: string }> = ({
         addLog("Local", `上下文构建失败: ${e}`, "warning");
       }
 
-      // 4. 通知云端开始任务
+      // 4. 通知云端开始任务 (REST API)
       addLog("Local", `发送指令: ${userInstruction || "默认分析"}`, "info");
 
-      // 🔥 传递 ModelConfig + Context + NetworkCaptures + FridaMode
-      await invoke("notify_cloud_job_start", {
-        sessionId: sessionId,
-        filePath: outputDir,
-        instruction: userInstruction,
-        modelConfig: modelConfig,
-        manifest: manifestContent, // 🔥 Handshake Payload
-        fileTree: fileTree,        // 🔥 Handshake Payload
-        networkCaptures: httpRequests, // 🔥 发送网络抓包数据
-        fridaMode: fridaMode,       // 🔥 新增：Frida 执行模式 (spawn/attach)
-        useStealthMode: useStealthMode // 🔥 新增：隐身模式
-      });
+      const res = await agentService.startAgentTask(
+        outputDir,
+        userInstruction,
+        {
+          manifestContent,
+          fileTree,
+          socketId: socketId, // 传递捕获到的 socketId
+          sessionId: sessionId // 🔥 传递与 socket 连接相同的 sessionId
+        }
+      );
+
+      addLog("Local", `任务已启动, SessionID: ${res.sessionId}`, "success");
+
+      // 兼容旧逻辑：如果需要通知 Rust 后端某些状态，可以在这里 invoke，但主要流程已由 REST 接管
+      // 但我们需要确保 NetworkCaptures 依然能同步。
+      // 注意：之前的 invoke("notify_cloud_job_start") 可能还做了上传 NetworkCaptures 的操作
+      // 我们需要手动补上这部分吗？
+      // 答：networkCaptures 监听器里有 `upload_traffic`，是实时的。
+      // 这里的一次性上传如果是为了初始化上下文，可能 REST API 的 StartAgentPayload 还没包含 networkCaptures。
+      // 但 StartAgentPayload 主要是为了启动 Graph。
+      // 如果后端 Graph 需要网络数据，可能需要专门的 API 或通过 State 同步。
+      // 目前 AgentStartPayload 没包含 networkCaptures。
+      // 我们先保持核心的 Static Analysis 流程畅通。
     } catch (e) {
       if (unlistenJadx) unlistenJadx();
       if (unlistenConnect) unlistenConnect();

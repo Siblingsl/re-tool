@@ -11,7 +11,11 @@ export type ViewMode =
   | "java-analyzer"
   | "network-sniffer"
   | "web-lab"
-  | "ai-chat";
+  | "ai-chat"
+  | "browser"
+  | "ast-lab"
+  | "ai-captcha"
+  | "js-script-workshop";
 
 export interface AiRequest {
   prompt: string;

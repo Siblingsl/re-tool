@@ -14,6 +14,17 @@ pub async fn start_mitmproxy(
     port: u16, 
     state: State<'_, MitmState>
 ) -> Result<String, String> {
+    start_filtered_mitm(app, port, state, Vec::new(), None).await
+}
+
+// 🔥 内部核心实现：支持过滤器
+pub async fn start_filtered_mitm(
+    app: tauri::AppHandle, 
+    port: u16, 
+    state: State<'_, MitmState>,
+    filters: Vec<String>,
+    session_id: Option<String>  // 🔥 新增：会话 ID
+) -> Result<String, String> {
 
     // 🔥 第一步：霸道清场 (直接调用 Windows 系统命令杀进程)
     // 无论之前是谁启动的 mitmdump，统统干掉
@@ -50,6 +61,136 @@ pub async fn start_mitmproxy(
     let script_path_str = script_path.to_string_lossy().to_string();
     println!("准备启动，脚本: {}", script_path_str);
 
+
+
+    // 🔥 如果有过滤器，动态生成脚本
+    if !filters.is_empty() {
+        println!("启用动态过滤: {:?}", filters);
+        let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let dyn_script_path = cwd.join("bin").join(format!("traffic_dynamic_{}.py", timestamp));
+        
+        // 读取原脚本
+        let original_code = std::fs::read_to_string(&script_path).map_err(|e| e.to_string())?;
+        
+        // 构造过滤列表 Json
+        let filters_json = serde_json::to_string(&filters).unwrap_or("[]".to_string());
+        
+        // 注入过滤逻辑
+        let injected_code = format!(r#"
+import json
+import sys
+import time
+import uuid
+import base64
+
+# 🔥 动态注入的过滤器
+FILTERS = {}
+
+def should_capture(flow):
+    if not FILTERS: return True
+    target = flow.request.url.lower()
+    # 检查 URL
+    if any(f.lower() in target for f in FILTERS): return True
+    
+    # 检查 Request Body
+    try:
+        if flow.request.content:
+            body = flow.request.content.decode('utf-8', 'ignore').lower()
+            if any(f.lower() in body for f in FILTERS): return True
+    except: pass
+    
+    # 检查 Response Body (Optional, might be expensive)
+    # try:
+    #     if flow.response and flow.response.content:
+    #         body = flow.response.content.decode('utf-8', 'ignore').lower()
+    #         if any(f.lower() in body for f in FILTERS): return True
+    # except: pass
+
+    return False
+
+# ================= 原有逻辑 =================
+# 拦截 request 和 response，增加 should_capture 检查
+
+def request(flow):
+    if not should_capture(flow): return
+    # 原逻辑
+    original_request(flow)
+
+def response(flow):
+    if not should_capture(flow): return
+    # 原逻辑
+    original_response(flow)
+
+{} 
+"#, filters_json, original_code.replace("def request(flow):", "def original_request(flow):").replace("def response(flow):", "def original_response(flow):"));
+
+        std::fs::write(&dyn_script_path, injected_code).map_err(|e| e.to_string())?;
+        
+        // 更新使用的脚本路径
+        // sidecar args 已经 push 了，这里要替换最后一个
+        // 但是 sidecar args 是 chain 调用，没法改...
+        // 所以我们要在 spawn 之前决定用哪个 path
+        
+        // 重新构建 args
+        // 由于 sidecar api 限制，我们只能重新写一段逻辑或者在上方 if else
+    }
+
+    // 重新组织代码结构以支持 arg 替换比较麻烦，
+    // 我们简单点：如果 filters 不为空，就用 generated path，否则用 static path
+    
+    let final_script_path = if !filters.is_empty() {
+        let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let dyn_path = cwd.join("bin").join(format!("traffic_dynamic_{}.py", timestamp));
+        
+        // 读取原脚本
+        let original_code = std::fs::read_to_string(&script_path).map_err(|e| e.to_string())?;
+        let filters_json = serde_json::to_string(&filters).unwrap_or("[]".to_string());
+        
+        // 简单粗暴注入：直接在原代码头部插入过滤函数，并 Hook request/response
+        // 由于 python 缩进敏感，直接替换函数定义比较稳妥
+        let new_code = original_code
+            .replace("def request(flow):", "def original_request(flow):")
+            .replace("def response(flow):", "def original_response(flow):");
+            
+        let injected = format!(r#"
+import json
+import sys
+import time
+import uuid
+import base64
+
+FILTERS = {}
+
+def should_capture(flow):
+    if not FILTERS: return True
+    url = flow.request.url.lower()
+    if any(f.lower() in url for f in FILTERS): return True
+    try:
+        if flow.request.content:
+            body = flow.request.content.decode('utf-8', 'ignore').lower()
+            if any(f.lower() in body for f in FILTERS): return True
+    except: pass
+    return False
+
+def request(flow):
+    if should_capture(flow):
+        original_request(flow)
+
+def response(flow):
+    if should_capture(flow):
+        original_response(flow)
+
+{}
+"#, filters_json, new_code);
+
+        std::fs::write(&dyn_path, injected).map_err(|e| e.to_string())?;
+        dyn_path.to_string_lossy().to_string()
+    } else {
+        script_path_str
+    };
+
+    println!("最终脚本路径: {}", final_script_path);
+
     // 4. 启动 Sidecar
     let (mut rx, child) = app.shell().sidecar("mitmdump")
         .map_err(|e| format!("无法找到 Sidecar: {}", e))?
@@ -57,7 +198,7 @@ pub async fn start_mitmproxy(
             "-p", &port.to_string(), 
             "--set", "block_global=false", 
             "--set", "ssl_insecure=true",
-            "-s", &script_path_str
+            "-s", &final_script_path
         ])
         .spawn()
         .map_err(|e| format!("启动失败: {}", e))?;
@@ -65,8 +206,14 @@ pub async fn start_mitmproxy(
     // 5. 保存句柄
     *child_guard = Some(child);
 
+    // 🔥 克隆 session_id 用于异步任务
+    let session_for_upload = session_id.clone();
+
     // 6. 监听日志
     tauri::async_runtime::spawn(async move {
+        let client = reqwest::Client::new();
+        let cloud_url = std::env::var("CLOUD_URL").unwrap_or_else(|_| "http://127.0.0.1:3000".to_string());
+        
         while let Some(event) = rx.recv().await {
             match event {
                 CommandEvent::Stdout(line) => {
@@ -75,7 +222,24 @@ pub async fn start_mitmproxy(
                     if log.contains("Loading script") || log.contains("listening") || log.contains("{") {
                         //  println!("[Mitm]: {}", log); 
                     }
-                    let _ = app.emit("mitm-traffic", log);
+                    let _ = app.emit("mitm-traffic", log.clone());
+                    
+                    // 🔥 上报到云端 (D-3)
+                    if let Some(ref sid) = session_for_upload {
+                        // 尝试解析为 JSON
+                        if log.trim().starts_with('{') {
+                            if let Ok(capture) = serde_json::from_str::<serde_json::Value>(&log) {
+                                let _ = client.post(format!("{}/api/traffic", cloud_url))
+                                    .json(&serde_json::json!({
+                                        "sessionId": sid,
+                                        "capture": capture
+                                    }))
+                                    .timeout(std::time::Duration::from_millis(500))
+                                    .send()
+                                    .await;
+                            }
+                        }
+                    }
                 }
                 CommandEvent::Stderr(line) => {
                     let log = String::from_utf8_lossy(&line).to_string();

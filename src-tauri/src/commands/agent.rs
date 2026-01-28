@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use walkdir::WalkDir;
 use std::thread;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use capstone::prelude::*;
 use std::fs;
 use std::path::Path;
@@ -612,23 +612,30 @@ async fn dispatch_command(app: &AppHandle, action: &str, params: Value) -> Resul
             let elf = Elf::parse(&so_data).map_err(|e| format!("Failed to parse ELF: {}", e))?;
             
             // 确定架构
-            let (arch, mode) = match elf.header.e_machine {
-                goblin::elf::header::EM_AARCH64 => (capstone::Arch::ARM64, capstone::Mode::Arm),
-                goblin::elf::header::EM_ARM => (capstone::Arch::ARM, capstone::Mode::Arm),
-                goblin::elf::header::EM_X86_64 => (capstone::Arch::X86, capstone::Mode::Mode64),
-                goblin::elf::header::EM_386 => (capstone::Arch::X86, capstone::Mode::Mode32),
+            // 确定架构并创建 Capstone 引擎
+            let (arch, cs_result) = match elf.header.e_machine {
+                goblin::elf::header::EM_AARCH64 => (
+                    capstone::Arch::ARM64,
+                    Capstone::new().arm64().mode(capstone::arch::arm64::ArchMode::Arm).detail(true).build()
+                ),
+                goblin::elf::header::EM_ARM => (
+                    capstone::Arch::ARM,
+                    Capstone::new().arm().mode(capstone::arch::arm::ArchMode::Arm).detail(true).build()
+                ),
+                goblin::elf::header::EM_X86_64 => (
+                    capstone::Arch::X86,
+                    Capstone::new().x86().mode(capstone::arch::x86::ArchMode::Mode64).detail(true).build()
+                ),
+                goblin::elf::header::EM_386 => (
+                    capstone::Arch::X86,
+                    Capstone::new().x86().mode(capstone::arch::x86::ArchMode::Mode32).detail(true).build()
+                ),
                 m => return Err(format!("Unsupported architecture: {}", m)),
             };
             
             println!("[Agent] 📐 Detected arch: {:?}", arch);
-            
-            // 创建 Capstone 引擎
-            let cs = Capstone::new()
-                .set_arch(arch)
-                .mode(mode)
-                .detail(true)
-                .build()
-                .map_err(|e| format!("Failed to create Capstone: {:?}", e))?;
+
+            let cs = cs_result.map_err(|e| format!("Failed to create Capstone: {:?}", e))?;
             
             let mut results: Vec<serde_json::Value> = Vec::new();
             
@@ -715,6 +722,31 @@ async fn dispatch_command(app: &AppHandle, action: &str, params: Value) -> Resul
             }))
         }
         
+        // 🔥 [新增] 启动带过滤的 MITM
+        "START_MITM" => {
+            let filters: Vec<String> = params["filters"].as_array()
+                .map(|arr| arr.iter().map(|v| v.as_str().unwrap_or("").to_string()).collect())
+                .unwrap_or(Vec::new());
+
+            println!("[Agent] 🚦 Starting MITM with {} filters...", filters.len());
+            
+            // 手动获取 State
+            let mitm_state: tauri::State<crate::state::MitmState> = app.state();
+            
+            // 默认端口 8080，也可以从 params 获取
+            let port = params["port"].as_u64().unwrap_or(8080) as u16;
+            
+            // 🔥 获取当前会话 ID
+            let session_id = CURRENT_SESSION_ID.lock().unwrap().clone();
+
+            let result = commands::network::start_filtered_mitm(app.clone(), port, mitm_state, filters, session_id).await?;
+            Ok(json!({ "message": result }))
+        }
+        "STOP_MITM" => {
+            let mitm_state: tauri::State<crate::state::MitmState> = app.state();
+            let result = commands::network::stop_mitmproxy(mitm_state).await?;
+            Ok(json!({ "message": result }))
+        }
         _ => Err(format!("Unknown action: {}", action)),
     }
 }
@@ -781,16 +813,37 @@ pub async fn notify_cloud_job_start(
         "useStealthMode": use_stealth_mode.unwrap_or(false) // 🔥 新增：隐身模式
     });
 
-    let res = client.post(format!("{}/api/client-ready", CLOUD_URL))
+    // 1. 先调用 connect 进行 Recon（设备检测）
+    let connect_res = client.post(format!("{}/api/connect", CLOUD_URL))
         .json(&body)
         .send()
         .await
         .map_err(|e| e.to_string())?;
 
-    if res.status().is_success() {
+    if !connect_res.status().is_success() {
+        return Err(format!("Connect Error: {}", connect_res.status()));
+    }
+
+    println!("[Agent] ✅ Connect/Recon 完成，正在启动分析流程...");
+
+    // 2. 再调用 start 来启动 LangGraph 分析流程
+    let start_body = serde_json::json!({
+        "instruction": instruction,
+        "projectPath": file_path,
+        "socketId": session_id // 使用 sessionId 作为 socketId
+    });
+
+    let start_res = client.post(format!("{}/api/start", CLOUD_URL))
+        .json(&start_body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if start_res.status().is_success() {
+        println!("[Agent] 🚀 LangGraph 分析流程已启动");
         Ok("Started".to_string())
     } else {
-        Err(format!("Cloud Error: {}", res.status()))
+        Err(format!("Start Error: {}", start_res.status()))
     }
 }
 

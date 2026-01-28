@@ -1,10 +1,20 @@
 const { chromium, firefox, webkit } = require("playwright-extra");
 const stealthPlugin = require("puppeteer-extra-plugin-stealth");
 const readline = require("readline");
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
 const { injectHooks } = require("./hooks");
 const { startRpcServer, stopRpcServer, updatePage } = require("./rpc_server");
 const inspectorScript = require("./hooks/inspector_inject");
 const { deobfuscate } = require("./ast_transform");
+
+const LOG_FILE = path.join(os.tmpdir(), "retool_engine_debug.log");
+const logToFile = (msg) => {
+  try {
+    fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${msg}\n`);
+  } catch (e) { }
+};
 
 chromium.use(stealthPlugin());
 
@@ -21,9 +31,17 @@ const rl = readline.createInterface({
 
 const sendEvent = (type, payload) => {
   try {
-    console.log(JSON.stringify({ type, payload }));
-  } catch (e) {}
+    const jsonStr = JSON.stringify({ type, payload });
+    logToFile(`SEND: ${jsonStr}`);
+    console.log(jsonStr);
+  } catch (e) {
+    logToFile(`SEND ERROR: ${e.message}`);
+  }
 };
+// ... (skip lines)
+
+// ... (inside handlers)
+// Update handlers logic to log usage? No, I'll log in the line receiver.
 
 const sendRpcLog = (msg) => {
   sendEvent("rpc_log", msg);
@@ -41,6 +59,7 @@ const handleExit = (source) => {
 };
 
 const handlers = {
+  // ...
   async launch(config) {
     if (isBrowserActive) {
       sendEvent("status", "Browser Already Running");
@@ -234,7 +253,7 @@ const handlers = {
     } catch (e) {
       if (isBrowserActive) {
         sendEvent("error", `Launch Failed: ${e.message}`);
-        if (browser) await browser.close().catch(() => {});
+        if (browser) await browser.close().catch(() => { });
         handleExit("launch_error");
       }
     }
@@ -259,7 +278,7 @@ const handlers = {
         await page.exposeFunction("__weblab_onPick", (selector) => {
           sendEvent("inspector_picked", selector);
         });
-      } catch (e) {}
+      } catch (e) { }
       await page.evaluate(inspectorScript);
       sendEvent("console", "[Inspector] 拾取模式已激活，请点击网页元素");
     } catch (e) {
@@ -295,8 +314,9 @@ const handlers = {
       const resultCode = deobfuscate(sourceCode);
       const cost = Date.now() - startTime;
       sendEvent("ast_result", { code: resultCode, cost: cost });
-      sendEvent("console", `[AST] 还原成功 (耗时 ${cost}ms)`);
+      // sendEvent("console", `[AST] 还原成功 (耗时 ${cost}ms)`);
     } catch (e) {
+      logToFile(`AST ERROR: ${e.message}`); // Log to file instead of sending error immediately if risky
       sendEvent("error", `AST Error: ${e.message}`);
     }
   },
@@ -327,13 +347,20 @@ const handlers = {
 
 rl.on("line", (line) => {
   try {
+    logToFile(`RECV: ${line}`);
     const msg = JSON.parse(line);
     if (handlers[msg.action]) {
       handlers[msg.action](msg.data).catch((e) => {
+        logToFile(`HANDLER ERROR: ${e.message}`);
         if (isBrowserActive) sendEvent("error", e.toString());
+        else sendEvent("error", "Engine Error (Inactive): " + e.toString());
       });
+    } else {
+      logToFile(`UNKNOWN ACTION: ${msg.action}`);
     }
-  } catch (e) {}
+  } catch (e) {
+    logToFile(`PARSE ERROR: ${e.message}`);
+  }
 });
 
 sendEvent("status", "Engine Ready");

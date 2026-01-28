@@ -81,14 +81,10 @@ const WebLab: React.FC = () => {
   const [logs, setLogs] = useState<string>("");
   const [url, setUrl] = useState("https://www.whoer.net");
   const [config, setConfig] = useState({
-    browserType: "firefox",
-    stealth: true,
-    headless: false,
     hooks: ["json_hook", "rpc_inject"],
   });
 
-  const [rpcPort, setRpcPort] = useState(9999);
-  const [rpcRunning, setRpcRunning] = useState(false);
+
 
   const [interceptRules, setInterceptRules] = useState<InterceptRule[]>([]);
   const [isRuleModalOpen, setIsRuleModalOpen] = useState(false);
@@ -144,7 +140,7 @@ const WebLab: React.FC = () => {
           timing: s.timing || "start",
         }));
         setCustomScripts(parsed);
-      } catch (e) {}
+      } catch (e) { }
     }
   }, []);
 
@@ -195,7 +191,6 @@ const WebLab: React.FC = () => {
           payload === "Stopped"
         ) {
           setEngineStatus("Stopped");
-          setRpcRunning(false);
           isManuallyStopping.current = false;
           if (payload === "Browser Closed") message.info("浏览器已关闭");
         } else {
@@ -215,8 +210,6 @@ const WebLab: React.FC = () => {
       }
       if (type === "rpc_log") {
         const time = new Date().toLocaleTimeString();
-        if (payload.includes("已启动")) setRpcRunning(true);
-        if (payload.includes("已停止")) setRpcRunning(false);
         setLogs((prev) => prev + `\n[${time}] [RPC] ${payload}`);
         return;
       }
@@ -271,8 +264,8 @@ const WebLab: React.FC = () => {
           action: "launch",
           data: {
             url: url,
-            browserType: config.browserType,
-            headless: config.headless,
+            browserType: "chromium",
+            headless: false,
             hooks: config.hooks,
             intercepts: interceptRules.filter((r) => r.enabled),
             // 🔥🔥🔥 升级：传递包含 timing 的完整对象，而不仅仅是 code 字符串 🔥🔥🔥
@@ -295,7 +288,6 @@ const WebLab: React.FC = () => {
   const stopEngine = async () => {
     isManuallyStopping.current = true;
     setEngineStatus("Stopped");
-    setRpcRunning(false);
     try {
       await invoke("stop_web_engine");
       setTimeout(() => {
@@ -306,17 +298,7 @@ const WebLab: React.FC = () => {
     }
   };
 
-  const toggleRpc = async () => {
-    if (!isRunning) {
-      message.warning("请先启动浏览器");
-      return;
-    }
-    const action = rpcRunning ? "stop" : "start";
-    await invoke("send_web_command", {
-      action: "rpc_ctrl",
-      data: { action, port: rpcPort },
-    });
-  };
+
 
   const runEval = async () => {
     if (!isRunning) {
@@ -483,56 +465,7 @@ const WebLab: React.FC = () => {
       </div>
 
       <Collapse defaultActiveKey={["scripts"]} ghost size="small">
-        <Panel
-          header={
-            <span>
-              <ApiOutlined /> RPC 桥接服务
-            </span>
-          }
-          key="rpc"
-        >
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-              }}
-            >
-              {" "}
-              <Text>端口 (WS)</Text>{" "}
-              <InputNumber
-                value={rpcPort}
-                onChange={(v) => setRpcPort(v || 9999)}
-                disabled={rpcRunning}
-              />{" "}
-            </div>
-            <Button
-              type={rpcRunning ? "default" : "primary"}
-              danger={rpcRunning}
-              icon={<ThunderboltOutlined />}
-              onClick={toggleRpc}
-              block
-              disabled={!isRunning}
-            >
-              {" "}
-              {rpcRunning ? "关闭 RPC 服务" : "开启 RPC 服务"}{" "}
-            </Button>
-            {rpcRunning && (
-              <div
-                style={{
-                  fontSize: 12,
-                  color: "#10b981",
-                  background: "#ecfdf5",
-                  padding: 8,
-                  borderRadius: 4,
-                }}
-              >
-                服务地址: ws://127.0.0.1:{rpcPort}
-              </div>
-            )}
-          </div>
-        </Panel>
+
         <Panel
           header={
             <span>
@@ -541,41 +474,7 @@ const WebLab: React.FC = () => {
           }
           key="cdp"
         ></Panel>
-        <Panel
-          header={
-            <span>
-              <SettingOutlined /> 环境伪造
-            </span>
-          }
-          key="env"
-        >
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <Select
-              value={config.browserType}
-              onChange={(v) => setConfig({ ...config, browserType: v })}
-              options={[
-                { value: "firefox", label: "Firefox (Gecko)" },
-                { value: "chromium", label: "Chromium (Chrome)" },
-                { value: "webkit", label: "WebKit (Safari)" },
-              ]}
-              style={{ width: "100%" }}
-            />
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <span>隐身模式 (Stealth)</span>
-              <Switch
-                checked={config.stealth}
-                onChange={(v) => setConfig({ ...config, stealth: v })}
-              />
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <span>无头模式 (Headless)</span>
-              <Switch
-                checked={config.headless}
-                onChange={(v) => setConfig({ ...config, headless: v })}
-              />
-            </div>
-          </div>
-        </Panel>
+
         <Panel
           header={
             <span>

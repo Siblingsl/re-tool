@@ -202,6 +202,8 @@ const JavaAnalyzer: React.FC = () => {
     }
   };
 
+
+
   return (
     <Layout style={{ height: "100%", background: "#fff" }}>
       <Header
@@ -222,6 +224,7 @@ const JavaAnalyzer: React.FC = () => {
           >
             全局搜索
           </Button>
+
         </Space>
         <div style={{ color: "#999", fontSize: 12 }}>
           <CoffeeOutlined /> JADX Java 分析模式
@@ -400,7 +403,8 @@ const JavaAnalyzer: React.FC = () => {
           )}
         </div>
       </Modal>
-    </Layout>
+
+    </Layout >
   );
 };
 
