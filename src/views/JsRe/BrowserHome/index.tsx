@@ -53,7 +53,65 @@ import {
 } from "@ant-design/icons";
 import { BrowserInstance } from "@/components/Sidebar";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event"; // ✅ Add listen import
 
+/*
+// ...
+
+const BrowserHome: React.FC<BrowserHomeProps> = (props) => {
+    // ...
+    const [loadingMap, setLoadingMap] = useState<Record<string, boolean>>({});
+    const [maximizedInstanceId, setMaximizedInstanceId] = useState<string | null>(null);
+    const maximizedInstance = instances.find(i => i.id === maximizedInstanceId);
+
+    // ✅ Real logs state
+    const [logs, setLogs] = useState<Array<{ time: string, type: string, msg: string }>>([]);
+
+    // ✅ Listen to backend events
+    useEffect(() => {
+        const unlistenPromise = listen("weblab-event", (event: any) => {
+            const payload = event.payload;
+            const time = new Date().toLocaleTimeString();
+
+            // 1. Handle Logs
+            if (payload.type === "console" || payload.type === "info" || payload.type === "error") {
+                setLogs(prev => [...prev, { time, type: payload.type, msg: payload.payload || payload.msg }]);
+            }
+
+            // 2. Handle Errors (Toast)
+            if (payload.type === "error") {
+                message.error(payload.payload || payload.msg);
+                // If launch failed, verify status
+            }
+
+            // 3. Handle Status Changes
+            // The backend sends "status" events like "Browser Launched", "Browser Force Closed"
+            // We can use this to sync specific instance status if we could identify which instance it belongs to.
+            // Currently the Node engine is a SINGLE process singleton for simplicity. 
+            // So if it stops, the currently active running instance stops.
+
+            if (payload.type === "status") {
+                setLogs(prev => [...prev, { time, type: "success", msg: payload.payload }]);
+
+                const msg = payload.payload as string;
+                if (msg.includes("Launched")) {
+                    // Confirmed running
+                } else if (msg.includes("Closed") || msg.includes("Stopped")) {
+                    // Check if any instance is marked as running and stop it
+                    // Since we don't know EXACTLY which ID (unless we store activePid in backend),
+                    // we assume the `maximizedInstance` or `activeInstance` is the one.
+                    // A better way is to rely on `onUpdateInstance` to stop the running one.
+                    // For now, let's just log it. The UI button relies on optimistic updates, 
+                    // but we should set `loadingMap` to false.
+                }
+            }
+        });
+
+        return () => {
+            unlistenPromise.then(unlisten => unlisten());
+        };
+    }, []);
+*/
 // ================= Interfaces =================
 interface InterceptRule {
     id: string;
@@ -110,11 +168,35 @@ const BrowserHome: React.FC<BrowserHomeProps> = (props) => {
     const [maximizedInstanceId, setMaximizedInstanceId] = useState<string | null>(null);
     const maximizedInstance = instances.find(i => i.id === maximizedInstanceId);
 
-    // 模拟日志数据 (实际应从事件流获取)
-    const [logs, setLogs] = useState([
-        { time: "10:00:01", type: "info", msg: "Initializing browser process..." },
-        { time: "10:00:01", type: "info", msg: "Target: Chrome (120.0.0.0)" },
-    ]);
+    // ✅ Real logs state
+    const [logs, setLogs] = useState<Array<{ time: string, type: string, msg: string }>>([]);
+
+    // ✅ Listen to backend events
+    useEffect(() => {
+        const unlistenPromise = listen("weblab-event", (event: any) => {
+            const payload = event.payload;
+            const time = new Date().toLocaleTimeString();
+
+            // 1. Handle Logs
+            if (payload.type === "console" || payload.type === "info" || payload.type === "error") {
+                setLogs(prev => [...prev, { time, type: payload.type, msg: payload.payload || payload.msg }]);
+            }
+
+            // 2. Handle Errors (Toast)
+            if (payload.type === "error") {
+                message.error(payload.payload || payload.msg);
+            }
+
+            // 3. Status
+            if (payload.type === "status") {
+                setLogs(prev => [...prev, { time, type: "success", msg: payload.payload }]);
+            }
+        });
+
+        return () => {
+            unlistenPromise.then(unlisten => unlisten());
+        };
+    }, []);
 
     const [activeTab, setActiveTab] = useState("logs");
 
@@ -284,7 +366,9 @@ const BrowserHome: React.FC<BrowserHomeProps> = (props) => {
                                 mock_body: r.mockBody
                             })),
                             customScripts: [],
-                            rpcConfig: instance.rpc // ✅ 传递 RPC 配置
+                            rpcConfig: instance.rpc, // ✅ 传递 RPC 配置
+                            risk: instance.risk,     // ✅ 传递风控配置
+                            proxy: instance.proxy    // ✅ 传递代理配置
                         },
                     });
 

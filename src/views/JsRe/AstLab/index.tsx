@@ -82,7 +82,7 @@ const AstLab: React.FC = () => {
                 action: "ast_deobfuscate",
                 data: {
                     code: inputCode,
-                    // engine // 如果后端支持多引擎，这里可以传
+                    engine: engine
                 }
             });
             // 注意：因为是异步事件返回，所以这里不直接 setProcessing(false)

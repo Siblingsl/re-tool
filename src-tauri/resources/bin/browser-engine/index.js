@@ -8,6 +8,8 @@ const { injectHooks } = require("./hooks");
 const { startRpcServer, stopRpcServer, updatePage } = require("./rpc_server");
 const inspectorScript = require("./hooks/inspector_inject");
 const { deobfuscate } = require("./ast_transform");
+const { setupRiskControl } = require("./risk_solver");
+const ProxyChain = require("proxy-chain"); // ✅ Import proxy-chain
 
 const LOG_FILE = path.join(os.tmpdir(), "retool_engine_debug.log");
 const logToFile = (msg) => {
@@ -22,6 +24,7 @@ let browser = null;
 let context = null;
 let page = null;
 let isBrowserActive = false;
+let anonymizedProxyUrl = null; // ✅ Track anonymized proxy URL
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -52,6 +55,11 @@ const handleExit = (source) => {
     isBrowserActive = false;
     sendEvent("status", "Browser Closed");
     updatePage(null);
+    if (anonymizedProxyUrl) {
+      // ✅ Cleanup proxy server
+      ProxyChain.closeAnonymizedProxy(anonymizedProxyUrl, true).catch(() => { });
+      anonymizedProxyUrl = null;
+    }
     browser = null;
     context = null;
     page = null;
@@ -117,9 +125,48 @@ const handlers = {
           break;
       }
 
+      // 🔥🔥🔥 代理配置 🔥🔥🔥
+      let proxyOption = undefined;
+      // Define proxyServer manually as proxyOption.server might be overwritten below
+      if (config.proxy && config.proxy.mode !== "direct" && config.proxy.host && config.proxy.port) {
+        const protocol = config.proxy.mode; // http, https, socks5
+        let upstreamUrl = `${protocol}://${config.proxy.host}:${config.proxy.port}`;
+
+        if (config.proxy.username) {
+          // If auth is present, construct full URL with auth for proxy-chain
+          upstreamUrl = `${protocol}://${config.proxy.username}:${config.proxy.password}@${config.proxy.host}:${config.proxy.port}`;
+
+          // 🔥 Use proxy-chain to handle auth locally
+          sendEvent("console", `[Proxy] Starting local forwarder for ${protocol} auth...`);
+          try {
+            anonymizedProxyUrl = await ProxyChain.anonymizeProxy(upstreamUrl);
+            sendEvent("console", `[Proxy] Forwarder started: ${anonymizedProxyUrl}`);
+
+            // Playwright gets the local ANONYMOUS proxy
+            proxyOption = {
+              server: anonymizedProxyUrl
+            };
+          } catch (e) {
+            sendEvent("error", `[Proxy] Failed to start forwarder: ${e.message}`);
+            // Fallback to original (will fail likely)
+            proxyOption = { server: upstreamUrl };
+          }
+        } else {
+          // No auth, direct usage
+          proxyOption = {
+            server: upstreamUrl
+          };
+        }
+
+        if (!anonymizedProxyUrl) {
+          sendEvent("console", `[Proxy] Enabled: ${proxyOption.server}`);
+        }
+      }
+
       browser = await launcher.launch({
         headless: isHeadless,
         args: launchArgs,
+        proxy: proxyOption,
       });
 
       browser.on("disconnected", () => handleExit("browser_disconnected"));
@@ -152,6 +199,12 @@ const handlers = {
 
       page = await context.newPage();
       updatePage(page);
+
+      // 🔥🔥🔥 注入风控对抗 (Cloudflare 等) 🔥🔥🔥
+      if (config.risk) {
+        sendEvent("console", `[Risk] Applying Risk Control Config...`);
+        await setupRiskControl(page, config.risk);
+      }
 
       // 注入拦截规则
       for (const rule of interceptRules) {
@@ -311,7 +364,7 @@ const handlers = {
     sendEvent("console", "[AST] 正在解析并还原代码...");
     try {
       const startTime = Date.now();
-      const resultCode = deobfuscate(sourceCode);
+      const resultCode = deobfuscate(sourceCode, data.engine);
       const cost = Date.now() - startTime;
       sendEvent("ast_result", { code: resultCode, cost: cost });
       // sendEvent("console", `[AST] 还原成功 (耗时 ${cost}ms)`);

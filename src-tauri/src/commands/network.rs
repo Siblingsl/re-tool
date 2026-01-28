@@ -457,3 +457,53 @@ pub async fn replay_request(
 
     Ok(format!("状态码: {}\nContent-Type: {}\n\n响应内容 (预览):\n{}", status, content_type, preview))
 }
+
+#[derive(serde::Deserialize)]
+pub struct ProxyConfig {
+    pub mode: String, // http, https, socks5
+    pub host: String,
+    pub port: u16,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+#[tauri::command]
+pub async fn test_proxy_connection(proxy_config: ProxyConfig) -> Result<String, String> {
+    // 1. Construct Proxy URL
+    let scheme = match proxy_config.mode.as_str() {
+        "socks5" => "socks5", 
+        "http" => "http",
+        "https" => "http", // reqwest proxy url scheme is usually http:// for CONNECT tunnel
+        _ => return Err("Unsupported proxy mode".to_string()),
+    };
+
+    let proxy_url = format!("{}://{}:{}", scheme, proxy_config.host, proxy_config.port);
+    
+    // 2. Configure Proxy
+    let mut proxy = reqwest::Proxy::all(&proxy_url)
+        .map_err(|e| format!("Invalid proxy config: {}", e))?;
+
+    if let (Some(u), Some(p)) = (proxy_config.username, proxy_config.password) {
+        if !u.is_empty() {
+             proxy = proxy.basic_auth(&u, &p);
+        }
+    }
+
+    // 3. Create Client
+    let client = reqwest::Client::builder()
+        .proxy(proxy)
+        .connect_timeout(std::time::Duration::from_secs(5)) // Short timeout for testing
+        .timeout(std::time::Duration::from_secs(10))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .map_err(|e| format!("Client build failed: {}", e))?;
+
+    // 4. Test Connection (httpbin.org/ip)
+    let resp = client.get("https://httpbin.org/ip")
+        .send()
+        .await
+        .map_err(|e| format!("Connection failed: {}", e))?;
+
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    Ok(format!("Success! Remote IP: {}", text))
+}

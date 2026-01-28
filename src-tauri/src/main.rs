@@ -110,6 +110,7 @@ fn main() {
             network::install_cert_root,
             network::get_local_ip,
             network::replay_request,
+            network::test_proxy_connection,
 
             // --- Common ---
             commands::run_command,

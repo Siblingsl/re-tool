@@ -15,9 +15,12 @@
     "@babel/parser": "^7.28.5",
     "@babel/traverse": "^7.28.5",
     "@babel/types": "^7.28.5",
+    "@swc/core": "^1.15.11",
     "playwright": "^1.57.0",
     "playwright-extra": "^4.3.6",
+    "proxy-chain": "^2.7.1",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "uglify-js": "^3.19.3",
     "ws": "^8.18.3"
   }
 }

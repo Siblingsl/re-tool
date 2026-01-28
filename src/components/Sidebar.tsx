@@ -49,6 +49,7 @@ import {
   ScanOutlined,
   ThunderboltOutlined, // For AST
   FileTextOutlined, // For Scripts
+  SafetyCertificateOutlined,
   EyeOutlined, // For Captcha
 } from "@ant-design/icons";
 
@@ -129,6 +130,20 @@ export interface RpcConfig {
   port: number;
 }
 
+export interface RiskConfig {
+  bypassCF: boolean;
+  bypassAkamai: boolean;
+  bypassRuishu: boolean;
+}
+
+export interface ProxyConfig {
+  mode: "direct" | "http" | "https" | "socks5";
+  host?: string;
+  port?: number;
+  username?: string;
+  password?: string;
+}
+
 export interface BrowserInstance {
   id: string;
   name: string;
@@ -136,10 +151,12 @@ export interface BrowserInstance {
   status: "running" | "stopped";
   url: string;
   fingerprint: BrowserFingerprint;
-  rpc?: RpcConfig; // ✅ 新增 RPC 配置
-  env?: EnvConfig; // ✅ 新增环境配置
-  hooks?: string[]; // ✅ 注入的 Hook IDs
-  intercepts?: any[]; // ✅ 拦截规则
+  rpc?: RpcConfig;
+  env?: EnvConfig;
+  hooks?: string[];
+  intercepts?: any[];
+  risk?: RiskConfig;
+  proxy?: ProxyConfig; // ✅ 新增代理配置
 }
 
 interface ChatSession {
@@ -312,6 +329,54 @@ const Sidebar: React.FC<SidebarProps> = ({
   // ✅ 环境配置状态
   const [isEnvModalOpen, setIsEnvModalOpen] = useState(false);
   const [editingEnvInstanceId, setEditingEnvInstanceId] = useState<string | null>(null);
+
+  // ✅ 代理配置状态
+  const [isProxyModalOpen, setIsProxyModalOpen] = useState(false);
+  const [editingProxyInstanceId, setEditingProxyInstanceId] = useState<string | null>(null);
+  const [proxyForm] = Form.useForm();
+
+  const handleOpenProxyModal = (instance: BrowserInstance) => {
+    setEditingProxyInstanceId(instance.id);
+    const proxy = instance.proxy || { mode: "direct" };
+    proxyForm.setFieldsValue(proxy);
+    setIsProxyModalOpen(true);
+  };
+
+  const handleSaveProxyConfig = async () => {
+    try {
+      const values = await proxyForm.validateFields();
+      if (editingProxyInstanceId) {
+        onUpdateBrowserInstance(editingProxyInstanceId, { proxy: values });
+        setIsProxyModalOpen(false);
+        message.success("代理配置已更新");
+      }
+    } catch (e) { }
+  };
+
+  // ✅ 风控配置状态
+  const [isRiskModalOpen, setIsRiskModalOpen] = useState(false);
+  const [editingRiskInstanceId, setEditingRiskInstanceId] = useState<string | null>(null);
+  const [riskForm] = Form.useForm();
+
+  const handleOpenRiskModal = (instance: BrowserInstance) => {
+    setEditingRiskInstanceId(instance.id);
+    const risk = instance.risk || { bypassCF: false, bypassAkamai: false, bypassRuishu: false };
+    riskForm.setFieldsValue(risk);
+    setIsRiskModalOpen(true);
+  };
+
+  const handleSaveRiskConfig = async () => {
+    try {
+      const values = await riskForm.validateFields();
+      if (editingRiskInstanceId) {
+        onUpdateBrowserInstance(editingRiskInstanceId, { risk: values });
+        setIsRiskModalOpen(false);
+        message.success("风控配置已更新");
+      }
+    } catch (e) { }
+  };
+
+  // ✅ 风控配置状态 (Already defined above)
 
   const handleOpenEnvModal = (instance: BrowserInstance) => {
     setEditingEnvInstanceId(instance.id);
@@ -1669,6 +1734,18 @@ const Sidebar: React.FC<SidebarProps> = ({
                                 icon: <ThunderboltFilled style={{ color: "#faad14" }} />,
                                 onClick: () => handleOpenRpcModal(inst),
                               },
+                              {
+                                key: "risk_config",
+                                label: "风控配置",
+                                icon: <SafetyCertificateOutlined />,
+                                onClick: () => handleOpenRiskModal(inst),
+                              },
+                              {
+                                key: "proxy_config",
+                                label: "网络代理",
+                                icon: <ApiOutlined />,
+                                onClick: () => handleOpenProxyModal(inst),
+                              },
                               { type: "divider" },
                               {
                                 key: "action_network",
@@ -2064,6 +2141,155 @@ const Sidebar: React.FC<SidebarProps> = ({
             onPressEnter={handleAiRenameSubmit}
             autoFocus
           />
+        </Modal>
+
+        {/* ✅ 新增：风控配置弹窗 */}
+        <Modal
+          title={
+            <Space>
+              <SafetyCertificateOutlined style={{ color: token.colorWarning }} />
+              <span>风控配置 (Anti-bot)</span>
+            </Space>
+          }
+          open={isRiskModalOpen}
+          onOk={handleSaveRiskConfig}
+          onCancel={() => setIsRiskModalOpen(false)}
+          okText="保存配置"
+          cancelText="取消"
+          destroyOnClose
+        >
+          <Form form={riskForm} layout="vertical" style={{ marginTop: 20 }}>
+            <div style={{ background: '#fffbe6', padding: 12, borderRadius: 6, border: '1px solid #ffe58f', marginBottom: 20 }}>
+              <div style={{ display: 'flex', alignItems: 'center', marginBottom: 4 }}>
+                <ExclamationCircleFilled style={{ color: '#faad14', marginRight: 8 }} />
+                <span style={{ fontWeight: 600, color: '#d48806' }}>自动化过盾说明</span>
+              </div>
+              <span style={{ fontSize: 12, color: '#d48806' }}>
+                开启后，浏览器会自动注入反检测脚本并尝试点击验证码。
+                此操作会增加资源消耗，且可能被部分站点检测（建议配合高质量 ISP 代理）。
+              </span>
+            </div>
+
+            <Form.Item label="Cloudflare 5s 盾 (CF Bypass)" style={{ marginBottom: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span>自动检测并尝试穿透 Cloudflare Challenge</span>
+                <Form.Item name="bypassCF" valuePropName="checked" noStyle>
+                  <Switch />
+                </Form.Item>
+              </div>
+            </Form.Item>
+            <Divider style={{ margin: '12px 0' }} />
+
+            <Form.Item label="Akamai Bot Manager" style={{ marginBottom: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ color: '#999' }}>企业级反爬防护 (Coming Soon)</span>
+                <Form.Item name="bypassAkamai" valuePropName="checked" noStyle>
+                  <Switch disabled />
+                </Form.Item>
+              </div>
+            </Form.Item>
+            <Divider style={{ margin: '12px 0' }} />
+
+            <Form.Item label="瑞数 6 (River Security)" style={{ marginBottom: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ color: '#999' }}>动态混淆与环境检测 (Coming Soon)</span>
+                <Form.Item name="bypassRuishu" valuePropName="checked" noStyle>
+                  <Switch disabled />
+                </Form.Item>
+              </div>
+            </Form.Item>
+          </Form>
+        </Modal>
+
+        {/* ✅ 新增：代理配置弹窗 */}
+        <Modal
+          title="网络代理配置 (Proxy)"
+          open={isProxyModalOpen}
+          onOk={handleSaveProxyConfig}
+          onCancel={() => setIsProxyModalOpen(false)}
+          okText="保存配置"
+          cancelText="取消"
+          destroyOnClose
+        >
+          <Form form={proxyForm} layout="vertical" style={{ marginTop: 20 }}>
+            <Form.Item name="mode" label="代理模式" initialValue="direct">
+              <Select>
+                <Select.Option value="direct">直连 (Direct - No Proxy)</Select.Option>
+                <Select.Option value="http">HTTP</Select.Option>
+                <Select.Option value="https">HTTPS</Select.Option>
+                <Select.Option value="socks5">Socks5</Select.Option>
+              </Select>
+            </Form.Item>
+            <Form.Item
+              noStyle
+              shouldUpdate={(prev, current) => prev.mode !== current.mode}
+            >
+              {({ getFieldValue }) =>
+                getFieldValue("mode") !== "direct" ? (
+                  <>
+                    <div style={{ display: "flex", gap: 16 }}>
+                      <Form.Item
+                        name="host"
+                        label="主机 (Host)"
+                        style={{ flex: 2 }}
+                        rules={[{ required: true, message: "请输入主机地址" }]}
+                      >
+                        <Input placeholder="127.0.0.1" />
+                      </Form.Item>
+                      <Form.Item
+                        name="port"
+                        label="端口 (Port)"
+                        style={{ flex: 1 }}
+                        rules={[{ required: true, message: "请输入端口" }]}
+                      >
+                        <Input type="number" placeholder="7890" />
+                      </Form.Item>
+                    </div>
+                    <div style={{ display: "flex", gap: 16 }}>
+                      <Form.Item name="username" label="用户名 (可选)" style={{ flex: 1 }}>
+                        <Input placeholder="Username" />
+                      </Form.Item>
+                      <Form.Item name="password" label="密码 (可选)" style={{ flex: 1 }}>
+                        <Input.Password placeholder="Password" />
+                      </Form.Item>
+                    </div>
+                  </>
+                ) : null
+              }
+            </Form.Item>
+
+            <Form.Item shouldUpdate={(prev, cur) => prev.mode !== cur.mode}>
+              {({ getFieldValue }) =>
+                getFieldValue("mode") !== "direct" && (
+                  <Button
+                    type="dashed"
+                    block
+                    onClick={async () => {
+                      try {
+                        const values = await proxyForm.validateFields();
+                        // 🔴 Fix: Port needs to be a number for Rust u16
+                        const payload = {
+                          ...values,
+                          port: Number(values.port)
+                        };
+                        const hide = message.loading("正在测试代理连通性...", 0);
+                        try {
+                          const res = await invoke<string>("test_proxy_connection", { proxyConfig: payload });
+                          hide();
+                          message.success({ content: res, duration: 5 });
+                        } catch (e: any) {
+                          hide();
+                          message.error("连接失败: " + e.toString());
+                        }
+                      } catch (e) { }
+                    }}
+                  >
+                    <ApiOutlined /> 测试连接 (Test Connection)
+                  </Button>
+                )
+              }
+            </Form.Item>
+          </Form>
         </Modal>
 
         {/* ✅ 新增：指纹配置弹窗 */}
