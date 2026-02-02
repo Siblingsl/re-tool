@@ -16,8 +16,11 @@ import {
     Popconfirm,
     message,
     theme,
-    Divider
+    Divider,
+    Select,
 } from 'antd';
+import { invoke } from "@tauri-apps/api/core";
+import { BrowserInstance } from "../../../components/Sidebar";
 import {
     FileTextOutlined,
     PlusOutlined,
@@ -72,7 +75,12 @@ const MOCK_SCRIPTS: ScriptItem[] = [
     }
 ];
 
-const ScriptWorkshop: React.FC = () => {
+interface ScriptWorkshopProps {
+    browserInstances?: BrowserInstance[];
+    initialActiveId?: string;
+}
+
+const ScriptWorkshop: React.FC<ScriptWorkshopProps> = ({ browserInstances = [], initialActiveId }) => {
     const { token } = theme.useToken();
 
     // State
@@ -81,6 +89,12 @@ const ScriptWorkshop: React.FC = () => {
     const [currentCode, setCurrentCode] = useState<string>(MOCK_SCRIPTS[0].code);
     const [currentTiming, setCurrentTiming] = useState<'document_start' | 'document_end'>(MOCK_SCRIPTS[0].timing);
     const [searchText, setSearchText] = useState("");
+    const [targetInstanceId, setTargetInstanceId] = useState<string>(initialActiveId || (browserInstances.length > 0 ? browserInstances[0].id : ""));
+
+    // Ensure we have a valid target if props update
+    React.useEffect(() => {
+        if (initialActiveId) setTargetInstanceId(initialActiveId);
+    }, [initialActiveId]);
 
     // Get active script object
     const activeScript = scripts.find(s => s.id === activeScriptId) || scripts[0];
@@ -115,11 +129,31 @@ const ScriptWorkshop: React.FC = () => {
         message.success('脚本已保存');
     };
 
-    const handleRun = () => {
-        message.success({
-            content: `已成功注入: ${activeScript.name}`,
-            icon: <ThunderboltOutlined style={{ color: '#52c41a' }} />
-        });
+    const handleRun = async () => {
+        const targetInstance = browserInstances.find(i => i.id === targetInstanceId);
+        if (!targetInstance) {
+            message.error("请先选择一个目标浏览器实例");
+            return;
+        }
+        if (targetInstance.status !== 'running') {
+            message.error(`目标实例 "${targetInstance.name}" 未运行`);
+            return;
+        }
+
+        try {
+            // 目前后端架构基于单例 Engine，因此 targetInstanceId 更多是逻辑上的确认
+            // 该命令会发给当前运行的 Playwright Engine
+            await invoke("send_web_command", {
+                action: "eval",
+                data: currentCode
+            });
+            message.success({
+                content: `已注入到: ${targetInstance.name}`,
+                icon: <ThunderboltOutlined style={{ color: '#52c41a' }} />
+            });
+        } catch (e: any) {
+            message.error(`注入失败: ${e}`);
+        }
     };
 
     const handleCreateNew = () => {
@@ -259,13 +293,27 @@ const ScriptWorkshop: React.FC = () => {
                         <Card
                             title={
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                    <EditOutlined style={{ color: token.colorPrimary }} />
-                                    <Input
-                                        value={activeScript.name}
-                                        onChange={e => handleNameChange(e.target.value)}
-                                        variant="borderless"
-                                        style={{ fontWeight: 600, fontSize: 16, padding: '4px 0', width: 300, color: '#1f1f1f' }}
+
+                                    <Select
+                                        value={targetInstanceId}
+                                        onChange={setTargetInstanceId}
+                                        style={{ width: '90%' }}
+                                        placeholder="选择实例"
+                                        size="small"
+                                        options={browserInstances.map(i => ({
+                                            label: (
+                                                <Space size={4}>
+                                                    <span style={{
+                                                        display: 'inline-block', marginBottom: 2, width: 6, height: 6, borderRadius: '50%',
+                                                        backgroundColor: i.status === 'running' ? '#52c41a' : '#d9d9d9'
+                                                    }} />
+                                                    <div style={{ marginLeft: 6, fontSize: 12 }}>{i.name}</div>
+                                                </Space>
+                                            ),
+                                            value: i.id
+                                        }))}
                                     />
+
                                 </div>
                             }
                             extra={

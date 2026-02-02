@@ -22,7 +22,8 @@ import {
     Radio,
     Switch,
     Form,
-    Modal
+    Modal,
+    AutoComplete
 } from "antd";
 import {
     PlusOutlined,
@@ -141,6 +142,49 @@ const AVAILABLE_HOOKS: HookItem[] = [
     { id: "log_all", name: "Global Logger", desc: "Log all global function calls" },
 ];
 
+const CDP_METHODS = [
+    // Page
+    { value: "Page.navigate", label: "Page.navigate (跳转)" },
+    { value: "Page.reload", label: "Page.reload (刷新)" },
+    { value: "Page.captureScreenshot", label: "Page.captureScreenshot (截图)" },
+    { value: "Page.printToPDF", label: "Page.printToPDF (打印PDF)" },
+    { value: "Page.getFrameTree", label: "Page.getFrameTree (获取框架树)" },
+    { value: "Page.enable", label: "Page.enable (启用Page域)" },
+    // Runtime
+    { value: "Runtime.evaluate", label: "Runtime.evaluate (执行JS)" },
+    { value: "Runtime.callFunctionOn", label: "Runtime.callFunctionOn (调用函数)" },
+    { value: "Runtime.getProperties", label: "Runtime.getProperties (获取属性)" },
+    { value: "Runtime.enable", label: "Runtime.enable (启用Runtime域)" },
+    // Network
+    { value: "Network.enable", label: "Network.enable (启用网络监控)" },
+    { value: "Network.setUserAgentOverride", label: "Network.setUserAgentOverride (修改UA)" },
+    { value: "Network.clearBrowserCache", label: "Network.clearBrowserCache (清除缓存)" },
+    { value: "Network.getCookies", label: "Network.getCookies (获取Cookies)" },
+    { value: "Network.setCookie", label: "Network.setCookie (设置Cookie)" },
+    { value: "Network.deleteCookies", label: "Network.deleteCookies (删除Cookie)" },
+    // DOM
+    { value: "DOM.getDocument", label: "DOM.getDocument (获取DOM树)" },
+    { value: "DOM.querySelector", label: "DOM.querySelector (选择元素)" },
+    { value: "DOM.querySelectorAll", label: "DOM.querySelectorAll (选择所有元素)" },
+    { value: "DOM.setAttributeValue", label: "DOM.setAttributeValue (设置属性)" },
+    // Emulation
+    { value: "Emulation.setDeviceMetricsOverride", label: "Emulation.setDeviceMetricsOverride (设备模拟)" },
+    { value: "Emulation.setTouchEmulationEnabled", label: "Emulation.setTouchEmulationEnabled (触摸模拟)" },
+    { value: "Emulation.setGeolocationOverride", label: "Emulation.setGeolocationOverride (定位模拟)" },
+    // Input
+    { value: "Input.dispatchKeyEvent", label: "Input.dispatchKeyEvent (模拟按键)" },
+    { value: "Input.dispatchMouseEvent", label: "Input.dispatchMouseEvent (模拟鼠标)" },
+    { value: "Input.dispatchTouchEvent", label: "Input.dispatchTouchEvent (模拟触摸)" },
+    // Target
+    { value: "Target.createTarget", label: "Target.createTarget (新建标签页)" },
+    { value: "Target.closeTarget", label: "Target.closeTarget (关闭标签页)" },
+    // Browser
+    { value: "Browser.getVersion", label: "Browser.getVersion (版本信息)" },
+    { value: "Browser.close", label: "Browser.close (关闭浏览器)" },
+    // ApplicationCache
+    { value: "ApplicationCache.getFramesWithManifests", label: "ApplicationCache.getFramesWithManifests" },
+];
+
 interface BrowserHomeProps {
     instances: BrowserInstance[];
     activeInstance?: BrowserInstance; // 当前选中的实例（侧边栏联动）
@@ -226,7 +270,7 @@ const BrowserHome: React.FC<BrowserHomeProps> = (props) => {
 
     // Helpers for Props-based State
     const currentIntercepts = (maximizedInstance?.intercepts || []) as InterceptRule[];
-    const currentHookIds = (maximizedInstance?.hooks || ["json_hook", "rpc_inject"]) as string[];
+    const currentHookIds = (maximizedInstance?.hooks || ["json_hook"]) as string[];
 
     const addCdpLog = (msg: string) => {
         if (!maximizedInstanceId) return;
@@ -468,7 +512,7 @@ const BrowserHome: React.FC<BrowserHomeProps> = (props) => {
             </div>
 
             {/* 内容区域 */}
-            <div style={{ flex: 1, padding: maximizedInstance ? 0 : 24, overflowY: "auto", overflowX: "hidden" }}>
+            <div style={{ flex: 1, padding: maximizedInstance ? 0 : 24, overflowY: maximizedInstance ? "hidden" : "auto", overflowX: "hidden" }}>
 
                 {maximizedInstance ? (
                     // ================== 全屏：外部控制器视图 (现代化 UI) ==================
@@ -558,7 +602,7 @@ const BrowserHome: React.FC<BrowserHomeProps> = (props) => {
                             <Divider style={{ margin: 0 }} />
 
                             {/* 3. 快捷工具 */}
-                            <div style={{ padding: 24, flex: 1 }}>
+                            {/* <div style={{ padding: 24, flex: 1 }}>
                                 <div style={{ fontWeight: 600, marginBottom: 16, color: "#262626", fontSize: 15 }}>开发工具</div>
                                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                                     <Button icon={<BugOutlined />} disabled={maximizedInstance.status !== "running"} style={{ height: 40, borderRadius: 6 }}>DevTools</Button>
@@ -566,7 +610,7 @@ const BrowserHome: React.FC<BrowserHomeProps> = (props) => {
                                     <Button icon={<ScanOutlined />} disabled={maximizedInstance.status !== "running"} style={{ height: 40, borderRadius: 6 }}>检测指纹</Button>
                                     <Button icon={<DisconnectOutlined />} disabled={maximizedInstance.status !== "running"} style={{ height: 40, borderRadius: 6 }}>断开连接</Button>
                                 </div>
-                            </div>
+                            </div> */}
                         </div>
 
                         {/* 右侧：日志终端 (重制版) */}
@@ -595,15 +639,19 @@ const BrowserHome: React.FC<BrowserHomeProps> = (props) => {
                                     boxShadow: "0 4px 12px rgba(0,0,0,0.03)",
                                     borderRadius: 12
                                 }}
-                                bodyStyle={{ flex: 1, padding: 0, display: "flex", flexDirection: "column" }}
+                                bodyStyle={{ flex: 1, padding: 0, display: "flex", flexDirection: "column", minHeight: 0 }}
                             >
                                 {/* Tab Content Render */}
-                                <div style={{ flex: 1, display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+                                <div style={{ flex: 1, height: "100%", overflow: "hidden", minHeight: 0, position: "relative" }}>
 
                                     {/* 1. 日志面板 */}
                                     {activeTab === "logs" && (
                                         <div style={{
-                                            flex: 1,
+                                            position: "absolute",
+                                            top: 0,
+                                            left: 0,
+                                            right: 0,
+                                            bottom: 0,
                                             padding: 20,
                                             backgroundColor: "#1e1e1e",
                                             overflowY: "auto",
@@ -631,7 +679,7 @@ const BrowserHome: React.FC<BrowserHomeProps> = (props) => {
 
                                     {/* 2. 网络拦截面板 */}
                                     {activeTab === "network" && (
-                                        <div style={{ flex: 1, padding: 20, overflowY: "auto" }}>
+                                        <div style={{ position: "absolute", inset: 0, padding: 20, overflowY: "auto" }}>
                                             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
                                                 <span style={{ color: "#666" }}>拦截并替换网络请求 (Glob Pattern)</span>
                                                 <Button type="primary" size="small" icon={<PlusCircleOutlined />} onClick={() => { setEditingRule(null); setIsRuleModalOpen(true); form.resetFields(); }}>添加规则</Button>
@@ -670,8 +718,17 @@ const BrowserHome: React.FC<BrowserHomeProps> = (props) => {
                                             </div>
                                             <div style={{ padding: 12, backgroundColor: "#fff", borderTop: "1px solid #e8e8e8" }}>
                                                 <Space.Compact style={{ width: "100%" }}>
-                                                    <Input style={{ width: "30%" }} placeholder="Method (e.g. Page.reload)" value={cdpCmd.method} onChange={e => setCdpCmd(prev => ({ ...prev, method: e.target.value }))} />
-                                                    <Input style={{ width: "70%" }} placeholder='Params JSON (e.g. {"ignoreCache": true})' value={cdpCmd.params} onChange={e => setCdpCmd(prev => ({ ...prev, params: e.target.value }))} />
+                                                    <AutoComplete
+                                                        style={{ width: "30%" }}
+                                                        placeholder="Method (e.g. Page.reload)"
+                                                        value={cdpCmd.method}
+                                                        onChange={val => setCdpCmd(prev => ({ ...prev, method: val }))}
+                                                        options={CDP_METHODS}
+                                                        filterOption={(inputValue, option) =>
+                                                            ((option?.value || "") as string).toUpperCase().includes(inputValue.toUpperCase())
+                                                        }
+                                                    />
+                                                    <Input style={{ width: "60%" }} placeholder='Params JSON (e.g. {"ignoreCache": true})' value={cdpCmd.params} onChange={e => setCdpCmd(prev => ({ ...prev, params: e.target.value }))} />
                                                     <Button type="primary" icon={<SendOutlined />} onClick={handleSendCdp}>发送</Button>
                                                 </Space.Compact>
                                             </div>

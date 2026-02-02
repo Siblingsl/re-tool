@@ -51,6 +51,7 @@ import {
   FileTextOutlined, // For Scripts
   SafetyCertificateOutlined,
   EyeOutlined, // For Captcha
+  ExportOutlined,
 } from "@ant-design/icons";
 
 import {
@@ -1686,12 +1687,13 @@ const Sidebar: React.FC<SidebarProps> = ({
                         {/* 状态指示点 */}
                         <span
                           style={{
-                            width: 6,
-                            height: 6,
+                            width: 8,
+                            height: 8,
                             borderRadius: "50%",
                             background: inst.status === "running" ? "#10b981" : "#ccc",
                             flexShrink: 0,
                             marginRight: 4,
+                            marginTop: 2
                           }}
                           className="status-indicator"
                         />
@@ -3322,10 +3324,43 @@ const Sidebar: React.FC<SidebarProps> = ({
             </div>
 
             {targetRpcInstance.rpc?.enabled && targetRpcInstance.rpc && targetRpcInstance.status === "running" && (
-              <div style={{ marginTop: 8, padding: 12, backgroundColor: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 6, textAlign: 'center' }}>
-                <CheckCircleFilled style={{ color: '#52c41a', marginRight: 6 }} />
-                <span style={{ color: '#237804', fontWeight: 500 }}>ws://127.0.0.1:{targetRpcInstance.rpc.port}</span>
-              </div>
+              <>
+                <div style={{ marginTop: 8, padding: 12, backgroundColor: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 6, textAlign: 'center' }}>
+                  <CheckCircleFilled style={{ color: '#52c41a', marginRight: 6 }} />
+                  <span style={{ color: '#237804', fontWeight: 500 }}>ws://127.0.0.1:{targetRpcInstance.rpc.port}</span>
+                </div>
+
+                <div style={{ marginTop: 16 }}>
+                  <Dropdown
+                    menu={{
+                      items: [
+                        {
+                          key: "python",
+                          label: "复制 Python 客户端代码",
+                          onClick: () => {
+                            const port = targetRpcInstance.rpc?.port || rpcPortInput;
+                            const code = `import websocket\nimport json\n\n# pip install websocket-client\nws = websocket.WebSocket()\nws.connect("ws://127.0.0.1:${port}")\n\n# Example Call\nreq = { "action": "call", "func": "add", "args": [1, 2] }\nws.send(json.dumps(req))\nres = ws.recv()\nprint(res)`;
+                            navigator.clipboard.writeText(code);
+                            message.success("已复制 Python 代码");
+                          }
+                        },
+                        {
+                          key: "node",
+                          label: "复制 Node.js 客户端代码",
+                          onClick: () => {
+                            const port = targetRpcInstance.rpc?.port || rpcPortInput;
+                            const code = `const WebSocket = require('ws');\n\n// npm install ws\nconst ws = new WebSocket('ws://127.0.0.1:${port}');\n\nws.on('open', () => {\n  const req = { action: 'call', func: 'add', args: [1, 2] };\n  ws.send(JSON.stringify(req));\n});\n\nws.on('message', (data) => {\n  console.log('Result:', data.toString());\n});`;
+                            navigator.clipboard.writeText(code);
+                            message.success("已复制 Node.js 代码");
+                          }
+                        }
+                      ]
+                    }}
+                  >
+                    <Button block icon={<ExportOutlined />}>导出接口配置</Button>
+                  </Dropdown>
+                </div>
+              </>
             )}
           </div>
         )}

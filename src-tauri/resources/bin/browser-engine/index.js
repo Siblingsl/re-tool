@@ -312,6 +312,27 @@ const handlers = {
     }
   },
 
+  async cdp(data) {
+    if (!page || !isBrowserActive) {
+      sendEvent("error", "Page not ready");
+      return;
+    }
+    try {
+      // Reuse session if possible, but for MVP create new one is fine or verify Playwright docs.
+      // Ideally we should cache the session, but Playwright manages it.
+      const client = await context.newCDPSession(page);
+      const result = await client.send(data.method, data.params);
+      // Send result back
+      if (result && Object.keys(result).length > 0) {
+        sendEvent("console", `[CDP Result] ${JSON.stringify(result)}`);
+      } else {
+        sendEvent("console", `[CDP] Command Sent`);
+      }
+    } catch (e) {
+      sendEvent("error", `CDP Error: ${e.message}`);
+    }
+  },
+
   async rpc_ctrl(data) {
     if (data.action === "start") {
       startRpcServer(data.port, page, sendRpcLog);

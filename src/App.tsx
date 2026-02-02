@@ -476,7 +476,12 @@ const App: React.FC = () => {
         )}
         {currentView === "ast-lab" && <AstLab />}
         {currentView === "ai-captcha" && <AiCaptcha />}
-        {currentView === "js-script-workshop" && <ScriptWorkshop />}
+        {currentView === "js-script-workshop" && (
+          <ScriptWorkshop
+            browserInstances={browserInstances}
+            initialActiveId={activeBrowserId}
+          />
+        )}
         {currentView === "asm-lab" && (
           <Empty description="ARM 汇编实验室" style={{ marginTop: 100 }} />
         )}
